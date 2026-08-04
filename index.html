@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>德州扑克手牌复盘器</title>
+  <link rel="stylesheet" href="./styles.css?v=20260804a">
+</head>
+<body>
+  <section id="loginPage" class="login-page">
+    <div class="login-card">
+      <div class="chipmark">♠</div>
+      <h1>手牌复盘器</h1>
+      <p>输入账号密码后使用牌谱记录和 AI 分析。DeepSeek Key 只保存在服务端。</p>
+      <div class="password-login">
+        <label>账号
+          <input id="loginUsername" autocomplete="username" placeholder="例如 poker01">
+        </label>
+        <label>密码
+          <input id="loginPassword" type="password" autocomplete="current-password" placeholder="输入密码">
+        </label>
+        <button type="button" id="accountLogin" class="primary wide">登录</button>
+      </div>
+      <div class="admin-login">
+        <label>管理员登录码
+          <input id="adminCode" type="password" placeholder="输入服务端 ADMIN_LOGIN_CODE" autocomplete="off">
+        </label>
+        <button type="button" id="adminLogin" class="wide">管理员登录</button>
+      </div>
+      <p id="loginMessage" class="login-message"></p>
+    </div>
+  </section>
+
+  <main id="analysisPage" class="app tab-page active">
+    <section class="table-shell">
+      <header class="topbar">
+        <div>
+          <p id="streetLabel" class="eyebrow">Preflop · 1/2</p>
+          <h1 id="currentAction">点击玩家记录行动或编辑玩家</h1>
+        </div>
+        <div class="controls">
+          <button id="returnHand" class="return-action">返回</button>
+          <button id="completeStreet" class="primary action-finish">完成行动</button>
+        </div>
+      </header>
+
+      <div class="felt">
+        <div id="seatLayer" class="seat-layer"></div>
+        <div id="startOverlay" class="start-overlay" hidden>
+          <div class="start-prompt">
+            <p id="startStepLabel" class="eyebrow">开局设置</p>
+            <h2 id="startOverlayTitle">请选择 BTN 玩家位置</h2>
+            <span id="startOverlayHint">直接点击牌桌上的玩家</span>
+          </div>
+          <div id="startCardsPanel" class="start-cards-panel" hidden>
+            <div id="startHoleCards" class="deal-cards"></div>
+            <div>
+              <p class="picker-title">选择数字</p>
+              <div id="startRankPicker" class="picker-grid rank-grid"></div>
+            </div>
+            <div>
+              <p class="picker-title">选择花色</p>
+              <div id="startSuitPicker" class="picker-grid suit-grid"></div>
+            </div>
+          </div>
+        </div>
+        <div class="board-area">
+          <div id="boardCards" class="cards board"></div>
+          <div class="pot">
+            <span>底池</span>
+            <strong id="potSize">0</strong>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="side-panel">
+      <section class="panel compact">
+        <div class="brand">
+          <div class="chipmark">♠</div>
+          <div>
+            <h2>手牌复盘器</h2>
+            <p>9 人桌座位复盘</p>
+          </div>
+        </div>
+        <div class="grid two">
+          <label>牌桌人数
+            <select id="playerCount">
+              <option>2</option>
+              <option>3</option>
+              <option>4</option>
+              <option>5</option>
+              <option>6</option>
+              <option>7</option>
+              <option>8</option>
+              <option selected>9</option>
+            </select>
+          </label>
+          <label>盲注
+            <input id="blinds" value="1/2" autocomplete="off">
+          </label>
+          <label>Ante
+            <input id="anteAmount" type="number" min="0" step="1" value="0" autocomplete="off">
+          </label>
+          <label>第一视角手牌
+            <input id="heroCards" value="As Kh" autocomplete="off">
+          </label>
+          <label>有限鱿鱼
+            <input id="straddleAmount" type="number" min="0" step="1" value="0" autocomplete="off">
+          </label>
+        </div>
+        <label class="toggle-row">
+          <input id="unlimitedStraddle" type="checkbox">
+          <span>
+            <strong>血战鱿鱼</strong>
+            <small>开启后可在玩家弹窗反复记录鱿鱼</small>
+          </span>
+        </label>
+      </section>
+
+      <section class="panel compact">
+        <div class="section-head">
+          <h2>行动线</h2>
+          <strong id="stepCount">0/0</strong>
+        </div>
+        <ol id="timeline" class="timeline"></ol>
+      </section>
+
+      <section class="panel compact">
+        <h2>复盘分析</h2>
+        <div id="accountStatus" class="account-status">
+          <strong>未登录</strong>
+          <span>登录后可以使用牌谱分析</span>
+        </div>
+        <button id="reviewHand" class="primary wide">牌谱分析</button>
+        <button id="logoutButton" class="wide">退出登录</button>
+        <button id="exportJson" class="wide">导出 JSON</button>
+      </section>
+
+      <section id="adminPanel" class="panel compact" hidden>
+        <div class="section-head">
+          <h2>后台管理</h2>
+          <button type="button" id="refreshUsers">刷新</button>
+        </div>
+        <div class="admin-config">
+          <h3>模型配置</h3>
+          <div id="apiKeyStatus" class="account-status">
+            <strong>API Key 未配置</strong>
+            <span>配置后用户即可通过后端进行牌谱分析</span>
+          </div>
+          <label>DeepSeek API Key
+            <input id="adminApiKey" type="password" placeholder="只在需要更新时填写" autocomplete="off">
+          </label>
+          <label>模型
+            <input id="adminModel" value="deepseek-v4-pro" autocomplete="off">
+          </label>
+          <button type="button" id="saveAdminSettings" class="primary wide">保存配置</button>
+        </div>
+        <div class="admin-config">
+          <h3>注册用户与付费情况</h3>
+          <div id="adminUserSummary" class="admin-summary"></div>
+        </div>
+        <div id="adminUserList" class="admin-user-list"></div>
+      </section>
+    </aside>
+  </main>
+
+  <section id="favoritesPage" class="tab-page page-shell" hidden>
+    <header class="page-head">
+      <p class="eyebrow">收藏</p>
+      <h1>收藏的手牌</h1>
+    </header>
+    <div id="favoriteList" class="record-list"></div>
+  </section>
+
+  <section id="playersPage" class="tab-page page-shell" hidden>
+    <header class="page-head">
+      <p class="eyebrow">玩家信息</p>
+      <h1>保存过 ID 的玩家</h1>
+    </header>
+    <div id="playerInfoList" class="record-list"></div>
+  </section>
+
+  <dialog id="seatDialog" class="seat-dialog">
+    <form method="dialog" id="seatForm">
+      <header class="dialog-head">
+        <div>
+          <p id="dialogSeat" class="eyebrow">Seat 1</p>
+          <h2 id="dialogTitle">玩家</h2>
+        </div>
+        <button value="close" class="icon-btn" title="关闭">×</button>
+      </header>
+
+      <div id="occupiedTools" class="dialog-body">
+        <div class="action-picks">
+          <button type="button" data-action="check" class="action-card">
+            <strong>过牌</strong>
+            <span>不投入筹码</span>
+          </button>
+          <button type="button" data-action="fold" class="action-card danger">
+            <strong>弃牌</strong>
+            <span>玩家退出本手牌</span>
+          </button>
+          <button type="button" data-action="call" class="action-card">
+            <strong>跟注</strong>
+            <span id="callHint">自动匹配当前跟注额</span>
+          </button>
+          <button type="button" data-action="raise" class="action-card">
+            <strong>加注</strong>
+            <span>输入本次投入金额</span>
+          </button>
+          <button type="button" data-action="allin" class="action-card danger">
+            <strong>All-in</strong>
+            <span id="allinHint">投入剩余筹码</span>
+          </button>
+          <button type="button" data-action="straddle" id="straddleAction" class="action-card">
+            <strong>鱿鱼</strong>
+            <span id="straddleHint">按设置金额记录</span>
+          </button>
+        </div>
+
+        <label id="amountWrap">行动金额
+          <input id="actionAmount" type="number" min="0" step="1" value="6">
+        </label>
+        <button type="button" id="recordAction" class="primary wide">记录行动</button>
+
+        <div class="grid two">
+          <label>有效筹码
+            <input id="playerStack" type="number" min="1" step="1">
+          </label>
+          <label>玩家风格
+            <select id="playerStyle">
+              <option>普通</option>
+              <option>松凶</option>
+              <option>紧凶</option>
+              <option>紧弱</option>
+              <option>松弱</option>
+            </select>
+          </label>
+        </div>
+        <label>玩家 ID
+          <input id="playerId" autocomplete="off">
+        </label>
+        <label class="toggle-row">
+          <input id="playerDealer" type="checkbox">
+          <span>
+            <strong>庄位</strong>
+            <small>打开后以该玩家为 BTN 重新计算位置</small>
+          </span>
+        </label>
+
+        <div class="dialog-actions">
+          <button type="button" id="savePlayer">保存玩家</button>
+          <button type="button" id="deletePlayer" class="danger-btn">删除玩家</button>
+        </div>
+      </div>
+
+      <div id="emptyTools" class="dialog-body">
+        <label>玩家 ID
+          <input id="newPlayerId" autocomplete="off" placeholder="例如 reg_042">
+        </label>
+        <div class="grid two">
+          <label>有效筹码
+            <input id="newPlayerStack" type="number" min="1" step="1" value="200">
+          </label>
+          <label>玩家风格
+            <select id="newPlayerStyle">
+              <option>普通</option>
+              <option>松凶</option>
+              <option>紧凶</option>
+              <option>紧弱</option>
+              <option>松弱</option>
+            </select>
+          </label>
+        </div>
+        <button type="button" id="addPlayerToSeat" class="primary wide">添加玩家</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dealDialog" class="seat-dialog">
+    <form method="dialog">
+      <header class="dialog-head">
+        <div>
+          <p id="dealStreetLabel" class="eyebrow">发牌</p>
+          <h2 id="dealTitle">编辑公共牌</h2>
+        </div>
+        <button value="close" class="icon-btn" title="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div id="dealCards" class="deal-cards"></div>
+        <div>
+          <p class="picker-title">选择数字</p>
+          <div id="rankPicker" class="picker-grid rank-grid"></div>
+        </div>
+        <div>
+          <p class="picker-title">选择花色</p>
+          <div id="suitPicker" class="picker-grid suit-grid"></div>
+        </div>
+        <button type="button" id="confirmDeal" class="primary wide">完成发牌并进入下一条街</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="returnDialog" class="seat-dialog">
+    <form method="dialog">
+      <header class="dialog-head">
+        <div>
+          <p class="eyebrow">返回</p>
+          <h2>要返回到哪里？</h2>
+        </div>
+        <button value="close" class="icon-btn" title="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <button type="button" id="returnPrevRound" class="wide">返回上一圈</button>
+        <button type="button" id="restartHand" class="primary wide">重新开始</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="reviewDialog" class="seat-dialog review-dialog">
+    <form method="dialog">
+      <header class="dialog-head">
+        <div>
+          <p class="eyebrow">牌谱分析</p>
+          <h2>本手牌建议</h2>
+        </div>
+        <button value="close" class="icon-btn" title="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <button type="button" id="runReviewFromDialog" class="primary wide">重新进行牌谱分析</button>
+        <div id="reviewOutput" class="review-output"></div>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="recordDialog" class="seat-dialog review-dialog">
+    <form method="dialog">
+      <header class="dialog-head">
+        <div>
+          <p id="recordDialogMeta" class="eyebrow">记录</p>
+          <h2 id="recordDialogTitle">详情</h2>
+        </div>
+        <button value="close" class="icon-btn" title="关闭">×</button>
+      </header>
+      <div id="recordDialogBody" class="dialog-body"></div>
+    </form>
+  </dialog>
+
+  <nav class="bottom-tabs" aria-label="底部导航">
+    <button type="button" class="active" data-tab="analysis">牌谱分析</button>
+    <button type="button" data-tab="favorites">收藏</button>
+    <button type="button" data-tab="players">玩家信息</button>
+  </nav>
+
+  <script src="./app.js?v=20260804a"></script>
+</body>
+</html>
