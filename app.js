@@ -1273,6 +1273,16 @@ function boardSummary() {
   };
 }
 
+function missingActionSummary(street = currentStreet()) {
+  const positions = positionsForSeats();
+  return playersMissingAction(street).map(index => ({
+    seat: index + 1,
+    position: positions[index],
+    playerId: state.seats[index]?.id || "",
+    reason: "该玩家在当前街还没有主动行动记录"
+  }));
+}
+
 function handPayload() {
   const positions = positionsForSeats();
   const { pot, totals } = totalsUntil(state.actions.length - 1);
@@ -1286,6 +1296,7 @@ function handPayload() {
       unlimited: $("unlimitedStraddle").checked
     },
     currentStreet: currentStreet(),
+    missingActionsOnCurrentStreet: missingActionSummary(currentStreet()),
     pot,
     heroCards: $("heroCards").value.trim(),
     board: boardSummary(),
@@ -1313,6 +1324,9 @@ function handPayload() {
           type: action.type,
           label: actionLabel(action),
           summary: action.summary,
+          isPlayerDecision: !action.forced || Boolean(action.manual),
+          actionKind: action.forced && !action.manual ? "forced_post" : "player_decision",
+          forcedMeaning: action.forced && !action.manual ? "强制投入，例如 ante / SB / BB；这不是玩家主动决策" : "",
           amount: amountFor(action),
           targetAmount: action.callToAmount || amountFor(action),
           incrementAmount: action.incrementAmount,
@@ -1331,7 +1345,7 @@ function handPayload() {
 function reviewPrompt(payload) {
   return [
     "你是一名线下德州扑克娱乐局复盘教练，同时理解 GTO，但分析时必须以线下娱乐局实战为主，GTO 只作为补充参考。",
-    "牌局默认不是常规线上尺度：翻前 open 到 10-15BB 是常态，3B/4B 尺度也可能显著偏大。不要因为翻前 open 尺度大就直接判定行动线错误；请结合玩家倾向、有效筹码、SPR、位置、底池赔率和后续行动来判断是否合理。",
+    "牌局默认不是常规线上尺度：翻前 open 到 10-20BB 都可能是常态，17BB open 不应被自动判定为异常；3B/4B 尺度也可能显著偏大。不要因为翻前 open 尺度大就直接判定行动线错误；请结合玩家倾向、有效筹码、SPR、位置、底池赔率和后续行动来判断是否合理。",
     "请用中文分析这手牌。不要泛泛而谈，必须结合行动线、位置、筹码、玩家风格、底池和公共牌。",
     "请按以下结构输出：",
     "1. 手牌摘要：一句话总结局面，并注明这是线下娱乐局尺度。",
@@ -1342,9 +1356,11 @@ function reviewPrompt(payload) {
     "6. Exploit 调整：结合玩家风格给出针对松凶、紧凶、紧弱、松弱、普通玩家的实战偏离。",
     "7. 最大错误与下一次复盘重点。",
     "如果信息不足，请明确指出缺失信息，并基于已有信息给出条件化判断。",
+    "行动数据里 actionKind=forced_post 表示强制投入，例如 ante / SB / BB，这不是玩家主动行动；actionKind=player_decision 才是玩家主动决策。不要把盲注强制投入误读为该玩家已经主动行动。",
+    "只有 missingActionsOnCurrentStreet 明确列出的玩家，才可以被判定为当前街缺少主动行动。不要凭位置顺序猜测某玩家漏行动；如果 missingActionsOnCurrentStreet 为空，就不要输出“某玩家没有行动导致牌路逻辑缺失”。",
     "注意行动数据中的 previousAction / incrementAmount / targetAmount：如果一名玩家先 open 或跟注，后面面对 3B/再加注自动补跟，请理解为该玩家先前已有投入，之后补到 targetAmount，不要误判为该玩家与后位玩家同时加注到同一金额。",
     "每条行动还包含 stackBeforeAction / stackAfterAction / behindBeforeAction / behindAfterAction，请用行动当下的后手筹码评估下注尺度、SPR、是否承诺底池以及 all-in 压力。",
-    "当翻前 open 是 10-15BB 时，请视为该局常规环境参数，而不是自动标记为过大失误；只有在结合后手、位置、对手范围、赔率后确实不合理时，才指出问题。",
+    "当翻前 open 是 10-20BB，尤其 17BB 左右时，请视为该局常规环境参数，而不是自动标记为过大失误；只有在结合后手、位置、对手范围、赔率后确实不合理时，才指出问题。",
     "",
     "牌局数据 JSON：",
     JSON.stringify(payload, null, 2)
@@ -1678,7 +1694,7 @@ async function runDeepSeekReview() {
       messages: [
         {
           role: "system",
-          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，必须以线下实战盈利和玩家倾向为主，逐街分析行动线、范围和可执行建议；GTO 只作为补充参考。"
+          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，必须以线下实战盈利和玩家倾向为主，逐街分析行动线、范围和可执行建议；GTO 只作为补充参考。本牌局环境中翻前 10-20BB open 属于常见尺度，不得仅因 17BB open 就判定异常。只有数据的 missingActionsOnCurrentStreet 明确列出玩家时，才可指出当前街缺少主动行动。"
         },
         {
           role: "user",
