@@ -1287,10 +1287,23 @@ function handPayload() {
   const positions = positionsForSeats();
   const { pot, totals } = totalsUntil(state.actions.length - 1);
   const enrichedActions = actionsWithAmounts();
+  const anteAmount = Number($("anteAmount").value || 0);
   return {
+    gameProfile: {
+      environment: "线下娱乐局",
+      analysisPriority: "实战盈利与玩家倾向优先，GTO 仅作补充参考",
+      normalPreflopOpenRangeBB: "3-20BB",
+      openSizeRule: "3BB 到 20BB 的翻前 open 在本局型中都属于正常尺度，不能仅因数值大于常规线上尺度而判定异常",
+      anteRule: "Ante 不是固定 1，而是由用户按当前级别填写的实际筹码额；例如 2/4、3/6、5/5 级别下 ante 数额可能不同",
+      configuredAnteAmount: anteAmount,
+      anteIsCommon: true,
+      straddleMode: "无限鱿鱼 / 血战鱿鱼",
+      straddleIsCommon: true,
+      sizingBaseline: "以本局 ante、鱿鱼、有效筹码、SPR、玩家倾向和现场尺度为基准，不以常规线上 2-3BB open 作为主要评判基准"
+    },
     playerCount: occupiedPlayerCount(),
     blinds: $("blinds").value,
-    ante: Number($("anteAmount").value || 0),
+    ante: anteAmount,
     straddle: {
       finiteAmount: Number($("straddleAmount").value || 0),
       unlimited: $("unlimitedStraddle").checked
@@ -1345,12 +1358,14 @@ function handPayload() {
 function reviewPrompt(payload) {
   return [
     "你是一名线下德州扑克娱乐局复盘教练，同时理解 GTO，但分析时必须以线下娱乐局实战为主，GTO 只作为补充参考。",
-    "牌局默认不是常规线上尺度：翻前 open 到 10-20BB 都可能是常态，17BB open 不应被自动判定为异常；3B/4B 尺度也可能显著偏大。不要因为翻前 open 尺度大就直接判定行动线错误；请结合玩家倾向、有效筹码、SPR、位置、底池赔率和后续行动来判断是否合理。",
+    "本工具服务的默认牌局画像是：线下娱乐局，通常有 ante，且 ante 数额由用户在本手牌设置项中填写，取决于当前盲注级别，不是固定 1BB；默认存在无限鱿鱼/血战鱿鱼；翻前 open 3-20BB 都属于正常现场尺度，17BB open 明确属于正常范围，不是异常大额下注。",
+    "严格禁止使用常规线上 2-3BB open 的基准来评价本牌局的翻前尺度。不要写“open 异常大”“open 过大”“不符合常规尺度”这类结论，除非你已经先承认 3-20BB 在该局型中正常，再基于有效筹码、SPR、位置、对手范围和赔率证明该具体动作在实战上亏损。",
+    "有 ante 和无限鱿鱼时，底池天然更大、现场 open 和 3B/4B 尺度天然更大。请使用牌局数据 JSON 中的 ante 实际数额，不要假设 ante 固定为 1BB；请把 ante 和鱿鱼作为环境参数，而不是错误来源。",
     "请用中文分析这手牌。不要泛泛而谈，必须结合行动线、位置、筹码、玩家风格、底池和公共牌。",
     "请按以下结构输出：",
     "1. 手牌摘要：一句话总结局面，并注明这是线下娱乐局尺度。",
     "2. 线下实战逐街复盘：Preflop / Flop / Turn / River 分别分析行动线是否合理、关键玩家范围、Hero 范围、对手价值范围、诈唬范围、可用尺度。",
-    "3. 对手范围：按玩家位置列出主要组合类别，不需要穷举全部组合，但要具体到牌型或典型手牌；范围判断要考虑娱乐局大尺度 open 和宽松跟注。",
+    "3. 对手范围：按玩家位置列出主要组合类别，不需要穷举全部组合，但要具体到牌型或典型手牌；范围判断要考虑 ante、无限鱿鱼、娱乐局 3-20BB open 和宽松跟注。",
     "4. 实战建议：优先给出在线下娱乐局里更赚钱、更稳健的推荐动作、下注尺度、继续/弃牌阈值。",
     "5. GTO 参考：单独说明理论基准与当前娱乐局偏离在哪里，不要用 GTO 结论覆盖实战建议。",
     "6. Exploit 调整：结合玩家风格给出针对松凶、紧凶、紧弱、松弱、普通玩家的实战偏离。",
@@ -1360,7 +1375,7 @@ function reviewPrompt(payload) {
     "只有 missingActionsOnCurrentStreet 明确列出的玩家，才可以被判定为当前街缺少主动行动。不要凭位置顺序猜测某玩家漏行动；如果 missingActionsOnCurrentStreet 为空，就不要输出“某玩家没有行动导致牌路逻辑缺失”。",
     "注意行动数据中的 previousAction / incrementAmount / targetAmount：如果一名玩家先 open 或跟注，后面面对 3B/再加注自动补跟，请理解为该玩家先前已有投入，之后补到 targetAmount，不要误判为该玩家与后位玩家同时加注到同一金额。",
     "每条行动还包含 stackBeforeAction / stackAfterAction / behindBeforeAction / behindAfterAction，请用行动当下的后手筹码评估下注尺度、SPR、是否承诺底池以及 all-in 压力。",
-    "当翻前 open 是 10-20BB，尤其 17BB 左右时，请视为该局常规环境参数，而不是自动标记为过大失误；只有在结合后手、位置、对手范围、赔率后确实不合理时，才指出问题。",
+    "当翻前 open 是 3-20BB，尤其 17BB 左右时，请视为该局常规环境参数，而不是自动标记为过大失误；只有在结合后手、位置、对手范围、赔率后确实不合理时，才指出问题。",
     "",
     "牌局数据 JSON：",
     JSON.stringify(payload, null, 2)
@@ -1383,6 +1398,7 @@ function renderPayloadSummary(payload) {
     <div class="readonly-block">
       <h3>手牌信息</h3>
       <p>${escapeHtml(payload.playerCount)} 人桌 · ${escapeHtml(payload.blinds)} · 底池 ${escapeHtml(payload.pot)}</p>
+      <p>局型：${escapeHtml(payload.gameProfile?.environment || "线下娱乐局")} · Ante ${escapeHtml(payload.ante ?? 0)} · ${payload.straddle?.unlimited ? "无限鱿鱼" : "有限鱿鱼"} · 常规 open ${escapeHtml(payload.gameProfile?.normalPreflopOpenRangeBB || "3-20BB")}</p>
       <p>Hero：${escapeHtml(payload.heroCards || "未填")} · 公共牌：${escapeHtml(board)}</p>
     </div>
     <div class="readonly-block">
@@ -1694,7 +1710,7 @@ async function runDeepSeekReview() {
       messages: [
         {
           role: "system",
-          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，必须以线下实战盈利和玩家倾向为主，逐街分析行动线、范围和可执行建议；GTO 只作为补充参考。本牌局环境中翻前 10-20BB open 属于常见尺度，不得仅因 17BB open 就判定异常。只有数据的 missingActionsOnCurrentStreet 明确列出玩家时，才可指出当前街缺少主动行动。"
+          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，必须以线下实战盈利和玩家倾向为主，逐街分析行动线、范围和可执行建议；GTO 只作为补充参考。本牌局通常有 ante，但 ante 数额取决于用户在本手牌里填写的实际设置，不是固定 1BB；本牌局默认有无限鱿鱼/血战鱿鱼，翻前 3-20BB open 都属于常见现场尺度，17BB open 明确不是异常大额下注。不得使用常规线上 2-3BB open 基准来判定本局 open 尺度异常。只有数据的 missingActionsOnCurrentStreet 明确列出玩家时，才可指出当前街缺少主动行动。"
         },
         {
           role: "user",
