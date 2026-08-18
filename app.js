@@ -936,6 +936,51 @@ function cardCode(card) {
   return card.rank && card.suit ? `${card.rank}${card.suit}` : "";
 }
 
+function normalizeCardCode(raw = "") {
+  const value = String(raw).trim();
+  if (!value) return "";
+  return `${value.slice(0, -1).toUpperCase()}${value.slice(-1).toLowerCase()}`;
+}
+
+function cardDisplay(raw = "") {
+  const normalized = normalizeCardCode(raw);
+  const parsed = normalized ? parseCards(normalized)[0] : null;
+  return parsed?.label || normalized || "未知牌";
+}
+
+function selectedBoardCards(excludeStreet = "") {
+  return [
+    ...(excludeStreet === "Flop" ? [] : state.board.flop.trim().split(/\s+/).filter(Boolean)),
+    ...(excludeStreet === "Turn" ? [] : state.board.turn.trim().split(/\s+/).filter(Boolean)),
+    ...(excludeStreet === "River" ? [] : state.board.river.trim().split(/\s+/).filter(Boolean))
+  ];
+}
+
+function duplicateCardMessage(cards) {
+  const seen = new Set();
+  const duplicate = cards
+    .map(normalizeCardCode)
+    .filter(Boolean)
+    .find(card => {
+      if (seen.has(card)) return true;
+      seen.add(card);
+      return false;
+    });
+  return duplicate ? `${cardDisplay(duplicate)} 已经被选择，不能重复发同一张牌。` : "";
+}
+
+function selectedDeckCards({ includeHero = true, excludeStreet = "", dealCards = [] } = {}) {
+  return [
+    ...(includeHero ? $("heroCards").value.trim().split(/\s+/).filter(Boolean) : []),
+    ...selectedBoardCards(excludeStreet),
+    ...dealCards.map(cardCode).filter(Boolean)
+  ];
+}
+
+function currentDeckError() {
+  return duplicateCardMessage(selectedDeckCards());
+}
+
 function cardFromCode(raw = "") {
   const value = String(raw).trim();
   return {
@@ -1058,6 +1103,11 @@ function confirmStartCards() {
     $("startOverlayTitle").textContent = "请先选完整手牌";
     return;
   }
+  const duplicateMessage = duplicateCardMessage(state.startConfig.cards.map(cardCode));
+  if (duplicateMessage) {
+    $("startOverlayTitle").textContent = duplicateMessage;
+    return;
+  }
   $("heroCards").value = state.startConfig.cards.map(cardCode).join(" ");
   setDealer(state.startConfig.dealerSeat);
   setHero(state.startConfig.heroSeat);
@@ -1066,6 +1116,13 @@ function confirmStartCards() {
 }
 
 function advanceStartCardSelection() {
+  const duplicateMessage = duplicateCardMessage(state.startConfig.cards.map(cardCode));
+  if (duplicateMessage) {
+    $("startOverlayTitle").textContent = duplicateMessage;
+    renderStartOverlay();
+    $("startOverlayTitle").textContent = duplicateMessage;
+    return;
+  }
   const cards = state.startConfig.cards;
   if (cards.every(card => card.rank && card.suit)) {
     confirmStartCards();
@@ -1075,6 +1132,16 @@ function advanceStartCardSelection() {
     state.startConfig.selectedCard = 1;
   }
   renderStartOverlay();
+}
+
+function warnDuplicateDealCard() {
+  const duplicateMessage = duplicateCardMessage(selectedDeckCards({
+    excludeStreet: state.dealTarget,
+    dealCards: state.dealCards
+  }));
+  if (!duplicateMessage) return false;
+  $("dealTitle").textContent = duplicateMessage;
+  return true;
 }
 
 function seatStreetAction(index) {
@@ -1350,6 +1417,14 @@ function confirmDeal() {
   const complete = state.dealCards.every(card => card.rank && card.suit);
   if (!complete) {
     $("dealTitle").textContent = "请先选完整牌面";
+    return;
+  }
+  const duplicateMessage = duplicateCardMessage(selectedDeckCards({
+    excludeStreet: state.dealTarget,
+    dealCards: state.dealCards
+  }));
+  if (duplicateMessage) {
+    $("dealTitle").textContent = duplicateMessage;
     return;
   }
   const cards = state.dealCards.map(cardCode).join(" ");
@@ -1886,6 +1961,11 @@ function renderReviewError(message) {
 async function runDeepSeekReview() {
   if (!ensureMemberForReview()) return;
 
+  const deckError = currentDeckError();
+  if (deckError) {
+    renderReviewError(deckError);
+    return;
+  }
   renderReviewLoading();
   const payload = handPayload();
   state.lastReviewPayload = payload;
@@ -2194,8 +2274,10 @@ function bind() {
     const button = event.target.closest("[data-suit]");
     if (!button) return;
     state.dealCards[state.selectedDealCard].suit = button.dataset.suit;
-    if (state.selectedDealCard < state.dealCards.length - 1) state.selectedDealCard += 1;
+    const duplicated = warnDuplicateDealCard();
+    if (!duplicated && state.selectedDealCard < state.dealCards.length - 1) state.selectedDealCard += 1;
     renderDealCards();
+    if (duplicated) warnDuplicateDealCard();
   });
 
   $("confirmDeal").addEventListener("click", confirmDeal);
