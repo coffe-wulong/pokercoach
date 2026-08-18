@@ -98,6 +98,53 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+const scrollLock = {
+  count: 0,
+  y: 0
+};
+
+function lockPageScroll() {
+  if (scrollLock.count === 0) {
+    scrollLock.y = window.scrollY || document.documentElement.scrollTop || 0;
+    document.body.style.position = "fixed";
+    document.body.style.top = `-${scrollLock.y}px`;
+    document.body.style.left = "0";
+    document.body.style.right = "0";
+    document.body.style.width = "100%";
+    document.body.classList.add("dialog-scroll-locked");
+  }
+  scrollLock.count += 1;
+}
+
+function unlockPageScroll() {
+  scrollLock.count = Math.max(0, scrollLock.count - 1);
+  if (scrollLock.count > 0) return;
+  document.body.classList.remove("dialog-scroll-locked");
+  document.body.style.position = "";
+  document.body.style.top = "";
+  document.body.style.left = "";
+  document.body.style.right = "";
+  document.body.style.width = "";
+  window.scrollTo(0, scrollLock.y);
+}
+
+function showDialog(dialog) {
+  if (!dialog || dialog.open) return;
+  lockPageScroll();
+  dialog.dataset.scrollLocked = "true";
+  dialog.showModal();
+}
+
+function closeDialog(dialog) {
+  if (!dialog?.open) return;
+  dialog.close();
+}
+
+function handleDialogClosed(dialog) {
+  if (dialog.dataset.scrollLocked !== "true") return;
+  delete dialog.dataset.scrollLocked;
+  unlockPageScroll();
+}
 
 function readStorage(key, fallback) {
   try {
@@ -112,14 +159,26 @@ function writeStorage(key, value) {
 }
 
 async function apiJson(path, options = {}) {
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {})
-    }
-  });
+  const { timeoutMs = 0, ...fetchOptions } = options;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timer = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+  let response;
+  try {
+    response = await fetch(path, {
+      credentials: "same-origin",
+      ...fetchOptions,
+      signal: controller?.signal || fetchOptions.signal,
+      headers: {
+        "Content-Type": "application/json",
+        ...(fetchOptions.headers || {})
+      }
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("分析请求超时，请稍后重试或检查模型服务状态。");
+    throw error;
+  } finally {
+    if (timer) window.clearTimeout(timer);
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || `请求失败，HTTP ${response.status}`);
   return data;
@@ -544,7 +603,7 @@ function returnToPreviousRound() {
   state.selectedDealCard = 0;
   refreshFoldedStates();
   state.step = state.actions.length - 1;
-  $("returnDialog").close();
+  closeDialog($("returnDialog"));
   render();
 }
 
@@ -552,7 +611,7 @@ function openReturnDialog() {
   const canReturnPrevious = state.streetIndex > 0;
   $("returnPrevRound").disabled = !canReturnPrevious;
   $("returnPrevRound").textContent = canReturnPrevious ? "返回上一圈" : "翻前不能返回上一圈";
-  $("returnDialog").showModal();
+  showDialog($("returnDialog"));
 }
 
 function setPlayerCount(count) {
@@ -591,7 +650,7 @@ function setDealer(index) {
 
 function activeSeatIndexes() {
   return state.seats
-    .map((player, index) => player && !player.folded && !player.allin ? index : null)
+    .map((player, index) => player && !player.folded && !seatIsAllIn(index) ? index : null)
     .filter(index => index !== null);
 }
 
@@ -648,6 +707,18 @@ function remainingStackForSeat(seatIndex, ignoredIndex = -1) {
   return Math.max(0, stack - investedBySeat(seatIndex, ignoredIndex));
 }
 
+function seatHasCommittedStack(seatIndex) {
+  const player = state.seats[seatIndex];
+  if (!player) return false;
+  return investedBySeat(seatIndex) >= Number(player.stack || 0);
+}
+
+function seatIsAllIn(seatIndex) {
+  const player = state.seats[seatIndex];
+  if (!player) return false;
+  return Boolean(player.allin) || seatHasCommittedStack(seatIndex);
+}
+
 function targetAmountForStreet(street = currentStreet(), ignoredIndex = -1) {
   return Math.max(
     0,
@@ -670,6 +741,7 @@ function callAmountForSeat(street = currentStreet(), seatIndex = state.selectedS
 }
 
 function legalActionsForSeat(street = currentStreet(), seatIndex = state.selectedSeat) {
+  if (seatIndex === null || seatIndex === undefined || seatIsAllIn(seatIndex)) return new Set();
   const existingIndex = manualActionIndexesForSeat(street, seatIndex)[0] ?? -1;
   const callAmount = callAmountForSeat(street, seatIndex);
   const remaining = seatIndex === null || seatIndex === undefined ? 0 : remainingStackForSeat(seatIndex, existingIndex);
@@ -724,7 +796,8 @@ function refreshFoldedStates() {
   state.seats.forEach((player, index) => {
     if (!player) return;
     player.folded = state.actions.some(action => action.seatIndex === index && action.type === "fold");
-    player.allin = state.actions.some(action => action.seatIndex === index && action.type === "allin");
+    player.allin = state.actions.some(action => action.seatIndex === index && action.type === "allin")
+      || seatHasCommittedStack(index);
   });
 }
 
@@ -736,10 +809,22 @@ function liveSeatIndexes() {
 
 function allLivePlayersAllIn() {
   const live = liveSeatIndexes();
-  return live.length > 1 && live.every(index => state.seats[index]?.allin);
+  return live.length > 1 && live.every(index => seatIsAllIn(index));
+}
+
+function handEndedByFolds() {
+  const live = liveSeatIndexes();
+  return live.length <= 1;
+}
+
+function allInRunoutReady() {
+  const live = liveSeatIndexes();
+  if (live.length <= 1) return false;
+  return live.filter(index => !seatIsAllIn(index)).length <= 1;
 }
 
 function playersMissingAction(street = currentStreet()) {
+  if (handEndedByFolds() || allInRunoutReady()) return [];
   const acted = new Set(actionsForStreet(street).filter(action => !action.forced).map(action => action.seatIndex));
   return activeSeatIndexes().filter(index => !acted.has(index));
 }
@@ -1101,7 +1186,7 @@ function openSeatDialog(index) {
     $("newPlayerStyle").value = "普通";
   }
 
-  $("seatDialog").showModal();
+  showDialog($("seatDialog"));
 }
 
 function updateActionAmountVisibility() {
@@ -1111,7 +1196,9 @@ function updateActionAmountVisibility() {
   const legalActions = legalActionsForSeat(currentStreet(), state.selectedSeat);
   const canStraddle = currentStreet() === "Preflop" && $("unlimitedStraddle").checked;
   if (!canStraddle && state.selectedAction === "straddle") state.selectedAction = "raise";
-  if (!legalActions.has(state.selectedAction)) {
+  if (!legalActions.size) {
+    state.selectedAction = "";
+  } else if (!legalActions.has(state.selectedAction)) {
     state.selectedAction = legalActions.has("call")
       ? "call"
       : legalActions.has("check")
@@ -1125,7 +1212,10 @@ function updateActionAmountVisibility() {
   $("allinHint").textContent = `投入 ${allinAmount}`;
   $("straddleAction").hidden = !canStraddle;
   $("straddleHint").textContent = `记录 ${straddleAmount()}`;
-  $("recordAction").textContent = state.selectedAction === "call"
+  $("recordAction").disabled = !legalActions.size;
+  $("recordAction").textContent = !legalActions.size
+    ? "玩家已 All-in"
+    : state.selectedAction === "call"
     ? `记录跟注 ${callAmount}`
     : state.selectedAction === "allin"
       ? `记录 All-in ${allinAmount}`
@@ -1197,8 +1287,13 @@ function addAction(type) {
   }
   normalizeStreetCallAmounts(street);
   refreshFoldedStates();
-  $("seatDialog").close();
-  if (allLivePlayersAllIn() && street !== "River") {
+  closeDialog($("seatDialog"));
+  if (handEndedByFolds()) {
+    render();
+    $("currentAction").textContent = "只剩一名未弃牌玩家，本手牌行动已结束，可以点击牌谱分析";
+    return;
+  }
+  if (allInRunoutReady() && street !== "River") {
     render();
     openDealDialog();
     return;
@@ -1247,7 +1342,7 @@ function openDealDialog() {
   $("dealStreetLabel").textContent = `${currentStreet()} 完成`;
   $("dealTitle").textContent = target === "Flop" ? "发翻牌" : target === "Turn" ? "发转牌" : "发河牌";
   renderDealCards();
-  $("dealDialog").showModal();
+  showDialog($("dealDialog"));
 }
 
 function confirmDeal() {
@@ -1263,8 +1358,15 @@ function confirmDeal() {
   if (state.dealTarget === "River") state.board.river = cards;
   state.streetIndex = streets.indexOf(state.dealTarget);
   state.step = state.actions.length - 1;
-  $("dealDialog").close();
+  closeDialog($("dealDialog"));
   render();
+  if (allInRunoutReady()) {
+    if (currentStreet() === "River") {
+      $("currentAction").textContent = "河牌已发完，可以点击牌谱分析";
+    } else {
+      window.setTimeout(openDealDialog, 0);
+    }
+  }
 }
 
 function boardSummary() {
@@ -1655,7 +1757,7 @@ function renderPlayerDetail(player) {
       `).join("") : "<p>暂无关联手牌。收藏包含此 ID 的复盘后会出现在这里。</p>"}
     </div>
   `;
-  $("recordDialog").showModal();
+  showDialog($("recordDialog"));
 }
 
 function openPlayerRecord(id) {
@@ -1688,7 +1790,8 @@ async function analyzePlayerStyle(id) {
           { role: "system", content: "你是一名严谨的德州扑克玩家画像与 exploit 策略教练。你要维护可迭代玩家基线，只基于上一版基线和最近 3 手记录更新，不要求全部历史手牌。" },
           { role: "user", content: playerAnalysisPrompt(player) }
         ]
-      })
+      }),
+      timeoutMs: 180000
     });
     const text = data.text || "模型没有返回文本。";
     records[id] = {
@@ -1719,7 +1822,7 @@ function openFavoriteRecord(id) {
       <pre class="model-review">${escapeHtml(record.reviewText)}</pre>
     </div>
   `;
-  $("recordDialog").showModal();
+  showDialog($("recordDialog"));
 }
 
 function setActiveTab(tab) {
@@ -1760,7 +1863,7 @@ function renderReviewLoading() {
       <span>会以线下娱乐局为主，逐街分析行动线、对手范围和实战建议。</span>
     </div>
   `;
-  $("reviewDialog").showModal();
+  showDialog($("reviewDialog"));
 }
 
 function renderReviewMarkdown(text) {
@@ -1777,7 +1880,7 @@ function renderReviewError(message) {
       <span>${message}</span>
     </div>
   `;
-  $("reviewDialog").showModal();
+  showDialog($("reviewDialog"));
 }
 
 async function runDeepSeekReview() {
@@ -1800,7 +1903,8 @@ async function runDeepSeekReview() {
           content: reviewPrompt(payload)
         }
       ]
-    })
+    }),
+    timeoutMs: 180000
   });
   const text = data.text;
   state.lastReviewText = text || "模型没有返回文本。";
@@ -1809,7 +1913,15 @@ async function runDeepSeekReview() {
 
 function completeStreet() {
   const street = currentStreet();
-  if (allLivePlayersAllIn() && street !== "River") {
+  if (handEndedByFolds()) {
+    $("currentAction").textContent = "只剩一名未弃牌玩家，本手牌行动已结束，可以点击牌谱分析";
+    return;
+  }
+  if (allInRunoutReady()) {
+    if (street === "River") {
+      $("currentAction").textContent = "河牌行动已完成，可以点击右侧复盘";
+      return;
+    }
     openDealDialog();
     return;
   }
@@ -1834,7 +1946,7 @@ async function analyzeHand() {
       <span>会把整手牌、每条街行动线、玩家风格和范围信息发送到你的后端分析服务。</span>
     </div>
   `;
-  $("reviewDialog").showModal();
+  showDialog($("reviewDialog"));
   try {
     await runDeepSeekReview();
   } catch (error) {
@@ -1860,7 +1972,7 @@ function applyPlayerEdits() {
 
 function savePlayer() {
   if (!applyPlayerEdits()) return;
-  $("seatDialog").close();
+  closeDialog($("seatDialog"));
   render();
 }
 
@@ -1876,7 +1988,7 @@ function deletePlayer() {
   streets.forEach(street => normalizeStreetCallAmounts(street));
   refreshFoldedStates();
   state.step = Math.min(state.step, state.actions.length - 1);
-  $("seatDialog").close();
+  closeDialog($("seatDialog"));
   render();
 }
 
@@ -1892,11 +2004,15 @@ function addPlayerToSeat() {
   };
   savePlayerRecord(state.seats[index]);
   state.playerCount = Math.min(9, Math.max(2, occupiedPlayerCount()));
-  $("seatDialog").close();
+  closeDialog($("seatDialog"));
   render();
 }
 
 function bind() {
+  ["seatDialog", "dealDialog", "returnDialog", "reviewDialog", "recordDialog"].forEach(id => {
+    $(id).addEventListener("close", () => handleDialogClosed($(id)));
+  });
+
   $("seatLayer").addEventListener("click", event => {
     const seatButton = event.target.closest("[data-seat]");
     if (!seatButton) return;
@@ -1926,7 +2042,7 @@ function bind() {
   $("returnHand").addEventListener("click", openReturnDialog);
   $("returnPrevRound").addEventListener("click", returnToPreviousRound);
   $("restartHand").addEventListener("click", () => {
-    $("returnDialog").close();
+    closeDialog($("returnDialog"));
     resetHandToStart();
   });
   $("playerCount").addEventListener("change", () => setPlayerCount($("playerCount").value));

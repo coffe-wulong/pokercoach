@@ -24,6 +24,11 @@ body {
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+body.dialog-scroll-locked {
+  overflow: hidden;
+  touch-action: none;
+}
+
 button, input, select, textarea { font: inherit; }
 
 button {
@@ -866,16 +871,23 @@ label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
 
 .seat-dialog {
   width: min(520px, calc(100vw - 28px));
+  max-height: min(86vh, 760px);
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--panel);
   color: var(--text);
   padding: 0;
+  overscroll-behavior: contain;
 }
 
 .seat-dialog::backdrop { background: rgba(0,0,0,.54); }
 
-.seat-dialog form { margin: 0; }
+.seat-dialog form {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  max-height: inherit;
+  margin: 0;
+}
 
 .dialog-head {
   display: flex;
@@ -897,6 +909,9 @@ label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
   display: grid;
   gap: 12px;
   padding: 16px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .action-picks {
@@ -1336,6 +1351,10 @@ button:active {
   transform: translateY(1px);
 }
 
+.seat:active {
+  transform: translate(-50%, -50%);
+}
+
 input,
 select,
 textarea {
@@ -1475,6 +1494,7 @@ textarea:focus {
   background:
     radial-gradient(circle at 50% 38%, #40515d 0 28%, #19242c 29% 62%, #0b1116 63%);
   box-shadow: 0 8px 14px rgba(0,0,0,.28);
+  pointer-events: none;
 }
 
 .seat > * {

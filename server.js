@@ -289,18 +289,29 @@ function requireAdmin(req, res) {
 async function callDeepSeek(messages) {
   const { apiKey, model } = deepSeekConfig();
   if (!apiKey) throw new Error("服务端还没有配置 DeepSeek API Key。");
-  const response = await fetch("https://api.deepseek.com/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      stream: false
-    })
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 180000);
+  let response;
+  try {
+    response = await fetch("https://api.deepseek.com/chat/completions", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: false
+      })
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("DeepSeek 请求超时，请稍后重试。");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(data.error?.message || `DeepSeek 请求失败，HTTP ${response.status}`);
