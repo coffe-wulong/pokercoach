@@ -289,6 +289,9 @@ function requireAdmin(req, res) {
 async function callDeepSeek(messages) {
   const { apiKey, model } = deepSeekConfig();
   if (!apiKey) throw new Error("服务端还没有配置 DeepSeek API Key。");
+  const startedAt = Date.now();
+  const requestId = randomBytes(4).toString("hex");
+  console.log(`[DeepSeek ${requestId}] start model=${model} messages=${Array.isArray(messages) ? messages.length : 0}`);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 180000);
   let response;
@@ -303,20 +306,31 @@ async function callDeepSeek(messages) {
       body: JSON.stringify({
         model,
         messages,
+        thinking: { type: "disabled" },
+        max_tokens: 6000,
         stream: false
       })
     });
   } catch (error) {
-    if (error?.name === "AbortError") throw new Error("DeepSeek 请求超时，请稍后重试。");
+    if (error?.name === "AbortError") {
+      console.error(`[DeepSeek ${requestId}] timeout after ${Date.now() - startedAt}ms`);
+      throw new Error("DeepSeek 请求超时，请稍后重试。");
+    }
+    console.error(`[DeepSeek ${requestId}] network error: ${error.message || error}`);
     throw error;
   } finally {
     clearTimeout(timer);
   }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.error?.message || `DeepSeek 请求失败，HTTP ${response.status}`);
+    const message = data.error?.message || `DeepSeek 请求失败，HTTP ${response.status}`;
+    console.error(`[DeepSeek ${requestId}] api error ${response.status}: ${message}`);
+    throw new Error(message);
   }
-  return data.choices?.[0]?.message?.content || data.output_text || "";
+  const choice = data.choices?.[0];
+  const text = choice?.message?.content || data.output_text || "";
+  console.log(`[DeepSeek ${requestId}] done ${Date.now() - startedAt}ms finish=${choice?.finish_reason || "unknown"} chars=${text.length}`);
+  return text;
 }
 
 function wechatAuthorizeUrl() {
