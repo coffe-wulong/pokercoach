@@ -11,6 +11,8 @@ const storageKeys = {
   favorites: "pokerReviewerFavorites",
   players: "pokerReviewerPlayers"
 };
+const minPlayerAnalysisHands = 3;
+const playerBaselineRecentHands = 3;
 const positionsByPlayers = {
   2: ["BTN/SB", "BB"],
   3: ["BTN", "SB", "BB"],
@@ -1433,6 +1435,34 @@ function playerHandActions(payload, playerId) {
     .map(action => `${street} · ${action.label}`));
 }
 
+function playerHandSnapshot(payload, playerId) {
+  const player = payload.players.find(item => item.id === playerId) || {};
+  return {
+    title: handTitle(payload),
+    game: {
+      playerCount: payload.playerCount,
+      blinds: payload.blinds,
+      ante: payload.ante,
+      straddle: payload.straddle,
+      pot: payload.pot,
+      heroCards: payload.heroCards,
+      board: payload.board
+    },
+    player: {
+      id: player.id,
+      position: player.position,
+      style: player.style,
+      stack: player.stack,
+      invested: player.invested,
+      remaining: player.remaining,
+      folded: player.folded,
+      hero: player.hero
+    },
+    playerActions: playerHandActions(payload, playerId),
+    fullActionLine: actionLines(payload)
+  };
+}
+
 function savePlayerRecord(player) {
   if (!player?.id || isSystemPlayerId(player.id)) return;
   const records = playerRecords();
@@ -1467,6 +1497,7 @@ function savePlayersFromPayload(payload, favoriteRecord) {
       remaining: player.remaining,
       folded: player.folded,
       actions: playerHandActions(payload, player.id),
+      handSummary: playerHandSnapshot(payload, player.id),
       reviewText: favoriteRecord.reviewText
     });
     records[player.id] = {
@@ -1527,48 +1558,90 @@ function renderPlayerInfoList() {
   `).join("") : `<div class="empty-state">还没有保存过 ID 的玩家。</div>`;
 }
 
+function playerBaselineText(player) {
+  return player.baselineText || player.analysisText || "";
+}
+
+function compactPlayerHand(hand) {
+  const summary = hand.handSummary || {};
+  return {
+    title: hand.title || summary.title,
+    createdAt: hand.createdAt,
+    position: hand.position || summary.player?.position,
+    style: hand.style || summary.player?.style,
+    stack: hand.stack ?? summary.player?.stack,
+    invested: hand.invested ?? summary.player?.invested,
+    remaining: hand.remaining ?? summary.player?.remaining,
+    folded: hand.folded ?? summary.player?.folded,
+    game: summary.game || {},
+    playerActions: hand.actions || summary.playerActions || [],
+    fullActionLine: summary.fullActionLine || [],
+    previousHandReviewExcerpt: String(hand.reviewText || "").slice(0, 900)
+  };
+}
+
+function recentPlayerHands(player) {
+  return (Array.isArray(player.hands) ? player.hands : [])
+    .slice(0, playerBaselineRecentHands)
+    .map(compactPlayerHand);
+}
+
 function playerAnalysisPrompt(player) {
-  const hands = (player.hands || []).map(hand => ({
-    title: hand.title,
-    position: hand.position,
-    style: hand.style,
-    stack: hand.stack,
-    invested: hand.invested,
-    remaining: hand.remaining,
-    folded: hand.folded,
-    actions: hand.actions,
-    handReviewExcerpt: String(hand.reviewText || "").slice(0, 1800)
-  }));
+  const handCount = playerHandCount(player);
+  const baseline = playerBaselineText(player);
+  const recentHands = recentPlayerHands(player);
   return [
-    "你是一名德州扑克玩家画像分析教练。",
-    "请只分析指定玩家的打法风格，不要复述整手牌。",
-    "请根据该玩家在关联手牌中的位置、行动线、投入、摊牌前后决策以及已有复盘内容，输出：",
-    "1. 玩家类型判断（松凶/紧凶/紧弱/松弱/普通，可带置信度）。",
-    "2. 翻前倾向。",
-    "3. 翻后倾向。",
-    "4. 可 exploit 的漏洞。",
-    "5. 下次遇到此玩家的实战调整。",
-    "如果样本不足，请明确说明不足，并给出暂定判断。",
+    "你是一名德州扑克玩家画像与 exploit 策略教练。",
+    "目标：为指定玩家维护一份可长期迭代的玩家基线，并给出与该玩家对战的策略建议。",
+    "重要限制：为了节省 tokens，输入不会包含该玩家所有历史手牌。你只能使用“上一版玩家基线”和“最近 3 手关联手牌”更新判断。不要要求用户补发全部历史记录。",
+    "牌局背景：线下娱乐局，常见 ante 和无限鱿鱼/血战鱿鱼；翻前 open 3-20BB 属于正常现场尺度。分析玩家倾向时不要套用线上常规 2-3BB open 基准。",
+    "请输出中文，结构必须包含：",
+    "1. 玩家基线更新：用 6-10 条短句生成可替代旧基线的新版本，包含玩家类型、翻前倾向、翻后倾向、尺度偏好、摊牌/弃牌倾向、情绪或娱乐局特征、样本置信度。",
+    "2. 当前打法风格判断：在松凶/紧凶/紧弱/松弱/普通中选择，允许给混合判断和置信度。",
+    "3. 对战策略建议：翻前、翻后、价值下注、诈唬、跟注/弃牌阈值分别给建议。",
+    "4. 最近 3 手带来的变化：说明相比旧基线是否需要更新判断。",
+    "5. 下一次重点观察：列 3 个以后记录手牌时最该观察的点。",
+    "如果上一版基线为空，请把最近手牌作为初始基线；如果最近手牌不足 3 手，仍可更新，但要说明置信度较低。",
     "",
     "玩家数据 JSON：",
-    JSON.stringify({ id: player.id, currentStyle: player.style, hands }, null, 2)
+    JSON.stringify({
+      id: player.id,
+      savedStyle: player.style,
+      totalRecordedHands: handCount,
+      previousBaseline: baseline || "暂无旧基线，这是首次建立玩家基线。",
+      previousBaselineHandCount: Number(player.baselineHandCount || 0),
+      recentHandsIncluded: recentHands.length,
+      recentHands
+    }, null, 2)
   ].join("\n");
 }
 
 function renderPlayerDetail(player) {
   const hands = Array.isArray(player.hands) ? player.hands : [];
+  const handCount = playerHandCount(player);
+  const baseline = playerBaselineText(player);
+  const canAnalyze = handCount >= minPlayerAnalysisHands;
+  const analyzedCount = Number(player.baselineHandCount || (player.analysisText ? handCount : 0));
+  const baselineStatus = baseline
+    ? `已基于 ${escapeHtml(analyzedCount || handCount)} 手牌建立基线${handCount > analyzedCount ? ` · 新增 ${escapeHtml(handCount - analyzedCount)} 手待更新` : ""}`
+    : "还未建立玩家基线";
   $("recordDialogMeta").textContent = `关联手牌 ${hands.length}`;
-  $("recordDialogTitle").textContent = `玩家 ${player.id}`;
+  $("recordDialogTitle").textContent = `玩家主页 · ${player.id}`;
   $("recordDialogBody").innerHTML = `
     <div class="readonly-block">
       <h3>玩家档案</h3>
       <p>当前类型：${escapeHtml(player.style || "普通")} · 有效筹码 ${escapeHtml(player.stack || "-")}</p>
       <p>最后记录：${escapeHtml(formatDateTime(player.lastSeenAt))}</p>
     </div>
-    <div class="readonly-block">
-      <h3>打法风格分析</h3>
-      <button type="button" class="primary wide" data-analyze-player="${escapeHtml(player.id)}">AI 分析打法风格</button>
-      <pre id="playerAnalysisText" class="model-review">${escapeHtml(player.analysisText || "还没有分析。点击上方按钮后，会基于此玩家关联手牌进行分析。")}</pre>
+    <div class="readonly-block player-strategy-card">
+      <h3>游戏风格与对战策略</h3>
+      <p class="baseline-meta">${baselineStatus}</p>
+      ${canAnalyze ? `
+        <button type="button" class="primary wide" data-analyze-player="${escapeHtml(player.id)}">${baseline ? "更新玩家基线与策略" : "建立玩家基线与策略"}</button>
+        <pre id="playerAnalysisText" class="model-review">${escapeHtml(baseline || "还没有分析。点击上方按钮后，会基于最近 3 手记录建立玩家基线。")}</pre>
+      ` : `
+        <div class="analysis-gate" id="playerAnalysisText">需要记录大于等于 3 手，才可分析出此玩家的风格与对战策略。当前已记录 ${escapeHtml(handCount)} 手。</div>
+      `}
     </div>
     <div class="readonly-block">
       <h3>关联手牌</h3>
@@ -1595,25 +1668,35 @@ async function analyzePlayerStyle(id) {
   const records = playerRecords();
   const player = records[id];
   if (!player) return;
+  const handCount = playerHandCount(player);
+  if (handCount < minPlayerAnalysisHands) {
+    $("playerAnalysisText").textContent = `需要记录大于等于 3 手，才可分析出此玩家的风格与对战策略。当前已记录 ${handCount} 手。`;
+    return;
+  }
   if (!ensureMemberForReview()) {
     $("playerAnalysisText").textContent = "当前账号还不能使用 AI 分析。";
     return;
   }
-  $("playerAnalysisText").textContent = "正在分析此玩家打法风格...";
+  $("playerAnalysisText").textContent = playerBaselineText(player)
+    ? "正在用旧基线和最近 3 手牌更新此玩家画像..."
+    : "正在基于最近手牌建立此玩家基线...";
   try {
     const data = await apiJson("/api/player-analysis", {
       method: "POST",
       body: JSON.stringify({
-      messages: [
-        { role: "system", content: "你是一名严谨的德州扑克玩家画像分析教练。" },
-        { role: "user", content: playerAnalysisPrompt(player) }
-      ]
-    })
+        messages: [
+          { role: "system", content: "你是一名严谨的德州扑克玩家画像与 exploit 策略教练。你要维护可迭代玩家基线，只基于上一版基线和最近 3 手记录更新，不要求全部历史手牌。" },
+          { role: "user", content: playerAnalysisPrompt(player) }
+        ]
+      })
     });
     const text = data.text || "模型没有返回文本。";
     records[id] = {
       ...player,
       analysisText: text,
+      baselineText: text,
+      baselineHandCount: handCount,
+      baselineRecentFavoriteIds: (player.hands || []).slice(0, playerBaselineRecentHands).map(hand => hand.favoriteId),
       analysisAt: new Date().toISOString()
     };
     writeStorage(storageKeys.players, records);
