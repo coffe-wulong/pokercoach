@@ -45,8 +45,8 @@ const seatLayoutsByPlayers = {
 function createPlayer(playerNumber, seatIndex) {
   return {
     id: `P${playerNumber}`,
-    stack: 200,
-    style: styles[(playerNumber - 1) % styles.length],
+    stack: defaultPlayerStack(),
+    style: "普通",
     hero: playerNumber === 1,
     dealer: playerNumber === 1,
     folded: false,
@@ -61,6 +61,26 @@ function buildSeats(playerCount = 9) {
     seats[seatIndex] = createPlayer(index + 1, seatIndex);
   });
   return seats;
+}
+
+function defaultStackForBlinds(blindsText = "1/2") {
+  const values = String(blindsText).split(/[\\s/]+/).map(value => Number(value)).filter(Number.isFinite);
+  const smallBlind = values[0] || 1;
+  const bigBlind = values[1] || values[0] || 2;
+  const bbCount = smallBlind === 1 && bigBlind === 2 ? 200 : 100;
+  return bigBlind * bbCount;
+}
+
+function defaultPlayerStack() {
+  return defaultStackForBlinds(document.getElementById("blinds")?.value || "1/2");
+}
+
+function applyDefaultStacksBeforeAction() {
+  if (state.actions.some(action => !action.forced || action.manual)) return;
+  const stack = defaultPlayerStack();
+  state.seats.forEach(player => {
+    if (player) player.stack = stack;
+  });
 }
 
 const state = {
@@ -424,6 +444,53 @@ function isSystemPlayerId(id = "") {
   return /^P\d+$/.test(String(id).trim());
 }
 
+function normalizePlayerId(id = "") {
+  return String(id).trim();
+}
+
+function playerRecordKey(id = "") {
+  return normalizePlayerId(id).toLocaleLowerCase("zh-CN");
+}
+
+function mergePlayerRecords(records = {}) {
+  return Object.values(records).reduce((merged, player) => {
+    if (!player?.id) return merged;
+    const key = playerRecordKey(player.id);
+    if (!key) return merged;
+    const previous = merged[key];
+    if (!previous) {
+      merged[key] = {
+        ...player,
+        id: player.id,
+        hands: Array.isArray(player.hands) ? player.hands : [],
+        handCount: playerHandCount(player)
+      };
+      return merged;
+    }
+    const hands = [
+      ...(Array.isArray(player.hands) ? player.hands : []),
+      ...(Array.isArray(previous.hands) ? previous.hands : [])
+    ].reduce((list, hand) => {
+      if (!hand?.favoriteId || list.some(item => item.favoriteId === hand.favoriteId)) return list;
+      list.push(hand);
+      return list;
+    }, []).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    merged[key] = {
+      ...previous,
+      ...player,
+      id: player.id || previous.id,
+      firstSeenAt: [previous.firstSeenAt, player.firstSeenAt].filter(Boolean).sort()[0] || previous.firstSeenAt || player.firstSeenAt,
+      lastSeenAt: [previous.lastSeenAt, player.lastSeenAt].filter(Boolean).sort().pop() || previous.lastSeenAt || player.lastSeenAt,
+      baselineText: player.baselineText || previous.baselineText,
+      analysisText: player.analysisText || previous.analysisText,
+      baselineHandCount: Math.max(Number(previous.baselineHandCount || 0), Number(player.baselineHandCount || 0)),
+      hands,
+      handCount: hands.length
+    };
+    return merged;
+  }, {});
+}
+
 function playerDisplayName(player) {
   if (!player) return "";
   return isSystemPlayerId(player.id) ? `玩家 ${player.id}` : `ID ${player.id}`;
@@ -619,6 +686,7 @@ function setPlayerCount(count) {
   state.playerCount = nextCount;
   state.seats = buildSeats(nextCount);
   resetHandProgress();
+  applyDefaultStacksBeforeAction();
   syncPlayerCountControl();
   render();
   window.setTimeout(openStartOverlay, 0);
@@ -1249,7 +1317,7 @@ function openSeatDialog(index) {
     updateActionAmountVisibility();
   } else {
     $("newPlayerId").value = `P${index + 1}`;
-    $("newPlayerStack").value = 200;
+    $("newPlayerStack").value = defaultPlayerStack();
     $("newPlayerStyle").value = "普通";
   }
 
@@ -1471,6 +1539,7 @@ function handPayload() {
     gameProfile: {
       environment: "线下娱乐局",
       analysisPriority: "实战盈利与玩家倾向优先，GTO 仅作补充参考",
+      handStrengthRule: "分析前必须精确比较五张最佳牌；例如 Hero AK 在 A-K-8-4-5 上是 AAKK8，压制 A8 的 AA88K，A8 不是能赢 Hero AK 的组合",
       normalPreflopOpenRangeBB: "3-20BB",
       openSizeRule: "3BB 到 20BB 的翻前 open 在本局型中都属于正常尺度，不能仅因数值大于常规线上尺度而判定异常",
       anteRule: "Ante 不是固定 1，而是由用户按当前级别填写的实际筹码额；例如 2/4、3/6、5/5 级别下 ante 数额可能不同",
@@ -1541,6 +1610,8 @@ function reviewPrompt(payload) {
     "严格禁止使用常规线上 2-3BB open 的基准来评价本牌局的翻前尺度。不要写“open 异常大”“open 过大”“不符合常规尺度”这类结论，除非你已经先承认 3-20BB 在该局型中正常，再基于有效筹码、SPR、位置、对手范围和赔率证明该具体动作在实战上亏损。",
     "有 ante 和无限鱿鱼时，底池天然更大、现场 open 和 3B/4B 尺度天然更大。请使用牌局数据 JSON 中的 ante 实际数额，不要假设 ante 固定为 1BB；请把 ante 和鱿鱼作为环境参数，而不是错误来源。",
     "请用中文分析这手牌。不要泛泛而谈，必须结合行动线、位置、筹码、玩家风格、底池和公共牌。",
+    "牌力判断必须先精确比较 5 张最佳牌，禁止只看“对手命中两对/成牌”就误判输赢。例如 Hero AK 在 A-K-8-4-5 公共牌上是 AAKK8，两对 A 和 K，明确压制 A8 的 AA88K；不要把 A8 这类较弱两对列为能赢 AK 的组合。列出 Hero 会输/会赢的组合前，必须确认其五张最佳牌确实高于/低于 Hero。",
+    "如果 Hero 手牌和公共牌已经在 payload 中给出，请优先基于确切牌面做摊牌牌力比较，再讨论范围与策略。",
     "请按以下结构输出：",
     "1. 手牌摘要：一句话总结局面，并注明这是线下娱乐局尺度。",
     "2. 线下实战逐街复盘：Preflop / Flop / Turn / River 分别分析行动线是否合理、关键玩家范围、Hero 范围、对手价值范围、诈唬范围、可用尺度。",
@@ -1598,7 +1669,12 @@ function favoriteRecords() {
 }
 
 function playerRecords() {
-  return readStorage(storageKeys.players, {});
+  const records = readStorage(storageKeys.players, {});
+  const merged = mergePlayerRecords(records);
+  if (Object.keys(merged).length !== Object.keys(records || {}).length) {
+    writeStorage(storageKeys.players, merged);
+  }
+  return merged;
 }
 
 function playerHandCount(player) {
@@ -1643,9 +1719,10 @@ function playerHandSnapshot(payload, playerId) {
 function savePlayerRecord(player) {
   if (!player?.id || isSystemPlayerId(player.id)) return;
   const records = playerRecords();
-  const id = player.id.trim();
-  const previous = records[id] || { id, handCount: 0, hands: [], firstSeenAt: new Date().toISOString() };
-  records[id] = {
+  const id = normalizePlayerId(player.id);
+  const key = playerRecordKey(id);
+  const previous = records[key] || { id, handCount: 0, hands: [], firstSeenAt: new Date().toISOString() };
+  records[key] = {
     ...previous,
     id,
     style: player.style,
@@ -1661,7 +1738,9 @@ function savePlayerRecord(player) {
 function savePlayersFromPayload(payload, favoriteRecord) {
   const records = playerRecords();
   payload.players.filter(player => !player.empty && player.id && !isSystemPlayerId(player.id)).forEach(player => {
-    const previous = records[player.id] || { id: player.id, handCount: 0, hands: [], firstSeenAt: new Date().toISOString() };
+    const id = normalizePlayerId(player.id);
+    const key = playerRecordKey(id);
+    const previous = records[key] || { id, handCount: 0, hands: [], firstSeenAt: new Date().toISOString() };
     const hands = Array.isArray(previous.hands) ? previous.hands.filter(hand => hand.favoriteId !== favoriteRecord.id) : [];
     hands.unshift({
       favoriteId: favoriteRecord.id,
@@ -1677,9 +1756,9 @@ function savePlayersFromPayload(payload, favoriteRecord) {
       handSummary: playerHandSnapshot(payload, player.id),
       reviewText: favoriteRecord.reviewText
     });
-    records[player.id] = {
+    records[key] = {
       ...previous,
-      id: player.id,
+      id,
       style: player.style,
       stack: player.stack,
       position: player.position,
@@ -1723,14 +1802,14 @@ function renderFavoriteList() {
 }
 
 function renderPlayerInfoList() {
-  const records = Object.values(playerRecords()).sort((a, b) => new Date(b.lastSeenAt) - new Date(a.lastSeenAt));
+  const records = Object.entries(playerRecords()).sort(([, a], [, b]) => new Date(b.lastSeenAt) - new Date(a.lastSeenAt));
   $("playerInfoList").innerHTML = records.length ? records.map(player => `
     <article class="record-card player-record">
       <div>
-        <strong>${escapeHtml(player.id)}</strong>
-        <span>${escapeHtml(player.style || "普通")} · 有效筹码 ${escapeHtml(player.stack || "-")} · 关联手牌 ${escapeHtml(playerHandCount(player))}</span>
+        <strong>${escapeHtml(player[1].id)}</strong>
+        <span>${escapeHtml(player[1].style || "普通")} · 有效筹码 ${escapeHtml(player[1].stack || "-")} · 关联手牌 ${escapeHtml(playerHandCount(player[1]))}</span>
       </div>
-      <button type="button" data-view-player="${escapeHtml(player.id)}">查看</button>
+      <button type="button" data-view-player="${escapeHtml(player[0])}">查看</button>
     </article>
   `).join("") : `<div class="empty-state">还没有保存过 ID 的玩家。</div>`;
 }
@@ -1836,14 +1915,15 @@ function renderPlayerDetail(player) {
 }
 
 function openPlayerRecord(id) {
-  const player = playerRecords()[id];
+  const player = playerRecords()[playerRecordKey(id)];
   if (!player) return;
   renderPlayerDetail(player);
 }
 
 async function analyzePlayerStyle(id) {
   const records = playerRecords();
-  const player = records[id];
+  const key = playerRecordKey(id);
+  const player = records[key];
   if (!player) return;
   const handCount = playerHandCount(player);
   if (handCount < minPlayerAnalysisHands) {
@@ -1869,7 +1949,7 @@ async function analyzePlayerStyle(id) {
       timeoutMs: 180000
     });
     const text = data.text || "模型没有返回文本。";
-    records[id] = {
+    records[key] = {
       ...player,
       analysisText: text,
       baselineText: text,
@@ -1976,7 +2056,7 @@ async function runDeepSeekReview() {
       messages: [
         {
           role: "system",
-          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，必须以线下实战盈利和玩家倾向为主，逐街分析行动线、范围和可执行建议；GTO 只作为补充参考。本牌局通常有 ante，但 ante 数额取决于用户在本手牌里填写的实际设置，不是固定 1BB；本牌局默认有无限鱿鱼/血战鱿鱼，翻前 3-20BB open 都属于常见现场尺度，17BB open 明确不是异常大额下注。不得使用常规线上 2-3BB open 基准来判定本局 open 尺度异常。只有数据的 missingActionsOnCurrentStreet 明确列出玩家时，才可指出当前街缺少主动行动。"
+          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，必须以线下实战盈利和玩家倾向为主，逐街分析行动线、范围和可执行建议；GTO 只作为补充参考。本牌局通常有 ante，但 ante 数额取决于用户在本手牌里填写的实际设置，不是固定 1BB；本牌局默认有无限鱿鱼/血战鱿鱼，翻前 3-20BB open 都属于常见现场尺度，17BB open 明确不是异常大额下注。不得使用常规线上 2-3BB open 基准来判定本局 open 尺度异常。只有数据的 missingActionsOnCurrentStreet 明确列出玩家时，才可指出当前街缺少主动行动。做摊牌和范围结论前必须准确比较五张最佳牌，不能把被 Hero 压制的弱两对误列为赢牌组合。"
         },
         {
           role: "user",
@@ -2041,7 +2121,7 @@ function applyPlayerEdits() {
   const oldId = player.id;
   player.stack = Number($("playerStack").value || 0);
   player.style = $("playerStyle").value;
-  player.id = $("playerId").value.trim() || oldId;
+  player.id = normalizePlayerId($("playerId").value) || oldId;
   if ($("playerDealer").checked || player.dealer) setDealer(index);
   state.actions.forEach(action => {
     if (action.seatIndex === index && action.playerId === oldId) action.playerId = player.id;
@@ -2075,8 +2155,8 @@ function deletePlayer() {
 function addPlayerToSeat() {
   const index = state.selectedSeat;
   state.seats[index] = {
-    id: $("newPlayerId").value.trim() || `P${index + 1}`,
-    stack: Number($("newPlayerStack").value || 200),
+    id: normalizePlayerId($("newPlayerId").value) || `P${index + 1}`,
+    stack: Number($("newPlayerStack").value || defaultPlayerStack()),
     style: $("newPlayerStyle").value,
     hero: !state.seats.some(player => player?.hero),
     dealer: !state.seats.some(player => player?.dealer),
@@ -2251,7 +2331,11 @@ function bind() {
     render();
   });
 
-  ["heroCards", "blinds", "anteAmount", "straddleAmount", "unlimitedStraddle"].forEach(id => {
+  $("blinds").addEventListener("input", () => {
+    applyDefaultStacksBeforeAction();
+    render();
+  });
+  ["heroCards", "anteAmount", "straddleAmount", "unlimitedStraddle"].forEach(id => {
     $(id).addEventListener("input", render);
   });
   $("unlimitedStraddle").addEventListener("change", render);
