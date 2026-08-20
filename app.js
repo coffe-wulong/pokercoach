@@ -808,6 +808,20 @@ function targetAmountForStreet(street = currentStreet(), ignoredIndex = -1) {
   );
 }
 
+function targetAmountBeforeAction(street, beforeIndex, ignoredIndex = -1) {
+  return Math.max(
+    0,
+    ...state.actions
+      .filter((action, index) => (
+        index < beforeIndex
+        && index !== ignoredIndex
+        && action.street === street
+        && !["ante", "check", "fold"].includes(action.type)
+      ))
+      .map(amountFor)
+  );
+}
+
 function callAmountForSeat(street = currentStreet(), seatIndex = state.selectedSeat) {
   const existingIndex = manualActionIndexesForSeat(street, seatIndex)[0] ?? -1;
   if (existingIndex >= 0) {
@@ -835,17 +849,12 @@ function normalizeStreetCallAmounts(street = currentStreet()) {
   const streetEntries = state.actions
     .map((action, index) => ({ action, index }))
     .filter(({ action }) => action.street === street);
-  const finalTarget = Math.max(
-    0,
-    ...streetEntries
-      .filter(({ action }) => !["ante", "check", "fold"].includes(action.type))
-      .map(({ action }) => amountFor(action))
-  );
-  streetEntries.forEach(({ action }) => {
+  streetEntries.forEach(({ action, index }) => {
     if (action.forced && !action.manual) return;
     if (["check", "fold", "allin"].includes(action.type)) return;
     if (action.type !== "call") return;
-    if (amountFor(action) >= finalTarget) return;
+    const targetAtActionTime = targetAmountBeforeAction(street, index);
+    if (targetAtActionTime <= 0 || amountFor(action) >= targetAtActionTime) return;
     const previousAmount = action.callToAmount || amountFor(action);
     if (previousAmount > 0 && !action.previousAction) {
       action.previousAction = {
@@ -853,8 +862,8 @@ function normalizeStreetCallAmounts(street = currentStreet()) {
         amount: previousAmount
       };
     }
-    action.amount = finalTarget;
-    action.callToAmount = finalTarget;
+    action.amount = targetAtActionTime;
+    action.callToAmount = targetAtActionTime;
   });
 }
 
@@ -1410,6 +1419,11 @@ function addAction(type) {
         type: existingAction.previousAction?.type || existingAction.type,
         amount: existingAction.previousAction?.amount || amountFor(existingAction)
       }
+    : type === "call" && existingAction?.type === "call" && callAmountForSeat(street, index) > amountFor(existingAction)
+      ? {
+          type: "call",
+          amount: existingAction.callToAmount || amountFor(existingAction)
+        }
     : type === "call" && existingAction?.previousAction
       ? existingAction.previousAction
       : null;
