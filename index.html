@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>德州扑克手牌复盘器</title>
-  <link rel="stylesheet" href="./styles.css?v=20260818d">
+  <link rel="stylesheet" href="./styles.css?v=20260820a">
 </head>
 <body>
   <section id="loginPage" class="login-page">
@@ -134,7 +134,6 @@
         </div>
         <button id="reviewHand" class="primary wide">牌谱分析</button>
         <button id="logoutButton" class="wide">退出登录</button>
-        <button id="exportJson" class="wide">导出 JSON</button>
       </section>
 
       <section id="adminPanel" class="panel compact" hidden>
@@ -334,6 +333,22 @@
     </form>
   </dialog>
 
+  <dialog id="reviewConfirmDialog" class="seat-dialog">
+    <form method="dialog">
+      <header class="dialog-head">
+        <div>
+          <p class="eyebrow">行动完成</p>
+          <h2>开始牌谱分析？</h2>
+        </div>
+        <button value="close" class="icon-btn" title="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <p class="dialog-copy">本手牌行动已经完成，可以现在进行牌谱分析。</p>
+        <button type="button" id="startReviewFromConfirm" class="primary wide">牌谱分析</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="recordDialog" class="seat-dialog review-dialog">
     <form method="dialog">
       <header class="dialog-head">
@@ -353,6 +368,6 @@
     <button type="button" data-tab="players">玩家信息</button>
   </nav>
 
-  <script src="./app.js?v=20260818d"></script>
+  <script src="./app.js?v=20260820a"></script>
 </body>
 </html>

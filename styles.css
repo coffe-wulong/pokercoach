@@ -926,6 +926,11 @@ label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
   -webkit-overflow-scrolling: touch;
 }
 
+.dialog-copy {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 .action-picks {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

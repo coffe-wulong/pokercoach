@@ -166,6 +166,12 @@ function handleDialogClosed(dialog) {
   unlockPageScroll();
 }
 
+function scrollHomeToTop() {
+  setActiveTab("analysis");
+  window.scrollTo(0, 0);
+  window.setTimeout(() => window.scrollTo(0, 0), 0);
+}
+
 function readStorage(key, fallback) {
   try {
     return JSON.parse(localStorage.getItem(key)) || fallback;
@@ -250,6 +256,7 @@ async function accountLogin() {
     $("loginPassword").value = "";
     $("loginMessage").textContent = "";
     renderAuthState();
+    scrollHomeToTop();
   } catch (error) {
     $("loginMessage").textContent = friendlyLoginError(error);
   }
@@ -269,6 +276,7 @@ async function adminLogin() {
     state.session = { user: data.user };
     $("loginMessage").textContent = "";
     renderAuthState();
+    scrollHomeToTop();
   } catch (error) {
     $("loginMessage").textContent = friendlyLoginError(error);
   }
@@ -1425,7 +1433,7 @@ function addAction(type) {
   closeDialog($("seatDialog"));
   if (handEndedByFolds()) {
     render();
-    $("currentAction").textContent = "只剩一名未弃牌玩家，本手牌行动已结束，可以点击牌谱分析";
+    $("currentAction").textContent = "只剩一名未弃牌玩家，本手牌行动已结束，可以进行牌谱分析";
     return;
   }
   if (allInRunoutReady() && street !== "River") {
@@ -1505,7 +1513,8 @@ function confirmDeal() {
   render();
   if (allInRunoutReady()) {
     if (currentStreet() === "River") {
-      $("currentAction").textContent = "河牌已发完，可以点击牌谱分析";
+      $("currentAction").textContent = "河牌已发完，可以进行牌谱分析";
+      openReviewConfirm("河牌已发完，本手牌可以开始牌谱分析。");
     } else {
       window.setTimeout(openDealDialog, 0);
     }
@@ -1609,11 +1618,12 @@ function reviewPrompt(payload) {
     "本工具服务的默认牌局画像是：线下娱乐局，通常有 ante，且 ante 数额由用户在本手牌设置项中填写，取决于当前盲注级别，不是固定 1BB；默认存在无限鱿鱼/血战鱿鱼；翻前 open 3-20BB 都属于正常现场尺度，17BB open 明确属于正常范围，不是异常大额下注。",
     "严格禁止使用常规线上 2-3BB open 的基准来评价本牌局的翻前尺度。不要写“open 异常大”“open 过大”“不符合常规尺度”这类结论，除非你已经先承认 3-20BB 在该局型中正常，再基于有效筹码、SPR、位置、对手范围和赔率证明该具体动作在实战上亏损。",
     "有 ante 和无限鱿鱼时，底池天然更大、现场 open 和 3B/4B 尺度天然更大。请使用牌局数据 JSON 中的 ante 实际数额，不要假设 ante 固定为 1BB；请把 ante 和鱿鱼作为环境参数，而不是错误来源。",
+    "以上局型、open 尺度、ante、鱿鱼信息是你的内部分析基准，不要在每一局输出中反复解释“因为这是娱乐局所以 open 10BB/15BB/20BB 合理”。只有当某个尺度本身成为关键决策点时，才简短提到尺度判断。",
     "请用中文分析这手牌。不要泛泛而谈，必须结合行动线、位置、筹码、玩家风格、底池和公共牌。",
     "牌力判断必须先精确比较 5 张最佳牌，禁止只看“对手命中两对/成牌”就误判输赢。例如 Hero AK 在 A-K-8-4-5 公共牌上是 AAKK8，两对 A 和 K，明确压制 A8 的 AA88K；不要把 A8 这类较弱两对列为能赢 AK 的组合。列出 Hero 会输/会赢的组合前，必须确认其五张最佳牌确实高于/低于 Hero。",
     "如果 Hero 手牌和公共牌已经在 payload 中给出，请优先基于确切牌面做摊牌牌力比较，再讨论范围与策略。",
     "请按以下结构输出：",
-    "1. 手牌摘要：一句话总结局面，并注明这是线下娱乐局尺度。",
+    "1. 手牌摘要：一句话总结局面，不要反复说明娱乐局 open 尺度合理。",
     "2. 线下实战逐街复盘：Preflop / Flop / Turn / River 分别分析行动线是否合理、关键玩家范围、Hero 范围、对手价值范围、诈唬范围、可用尺度。",
     "3. 对手范围：按玩家位置列出主要组合类别，不需要穷举全部组合，但要具体到牌型或典型手牌；范围判断要考虑 ante、无限鱿鱼、娱乐局 3-20BB open 和宽松跟注。",
     "4. 实战建议：优先给出在线下娱乐局里更赚钱、更稳健的推荐动作、下注尺度、继续/弃牌阈值。",
@@ -2038,6 +2048,12 @@ function renderReviewError(message) {
   showDialog($("reviewDialog"));
 }
 
+function openReviewConfirm(message = "本手牌行动已经完成，可以现在进行牌谱分析。") {
+  const copy = $("reviewConfirmDialog").querySelector(".dialog-copy");
+  if (copy) copy.textContent = message;
+  showDialog($("reviewConfirmDialog"));
+}
+
 async function runDeepSeekReview() {
   if (!ensureMemberForReview()) return;
 
@@ -2056,7 +2072,7 @@ async function runDeepSeekReview() {
       messages: [
         {
           role: "system",
-          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，必须以线下实战盈利和玩家倾向为主，逐街分析行动线、范围和可执行建议；GTO 只作为补充参考。本牌局通常有 ante，但 ante 数额取决于用户在本手牌里填写的实际设置，不是固定 1BB；本牌局默认有无限鱿鱼/血战鱿鱼，翻前 3-20BB open 都属于常见现场尺度，17BB open 明确不是异常大额下注。不得使用常规线上 2-3BB open 基准来判定本局 open 尺度异常。只有数据的 missingActionsOnCurrentStreet 明确列出玩家时，才可指出当前街缺少主动行动。做摊牌和范围结论前必须准确比较五张最佳牌，不能把被 Hero 压制的弱两对误列为赢牌组合。"
+          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，必须以线下实战盈利和玩家倾向为主，逐街分析行动线、范围和可执行建议；GTO 只作为补充参考。本牌局通常有 ante，但 ante 数额取决于用户在本手牌里填写的实际设置，不是固定 1BB；本牌局默认有无限鱿鱼/血战鱿鱼，翻前 3-20BB open 都属于常见现场尺度，17BB open 明确不是异常大额下注。不得使用常规线上 2-3BB open 基准来判定本局 open 尺度异常。上述局型和尺度只作为内部分析基准，不要在输出中反复解释“娱乐局所以 open 合理”，除非尺度是关键决策点。只有数据的 missingActionsOnCurrentStreet 明确列出玩家时，才可指出当前街缺少主动行动。做摊牌和范围结论前必须准确比较五张最佳牌，不能把被 Hero 压制的弱两对误列为赢牌组合。"
         },
         {
           role: "user",
@@ -2074,12 +2090,14 @@ async function runDeepSeekReview() {
 function completeStreet() {
   const street = currentStreet();
   if (handEndedByFolds()) {
-    $("currentAction").textContent = "只剩一名未弃牌玩家，本手牌行动已结束，可以点击牌谱分析";
+    $("currentAction").textContent = "只剩一名未弃牌玩家，本手牌行动已结束，可以进行牌谱分析";
+    openReviewConfirm("只剩一名未弃牌玩家，本手牌可以开始牌谱分析。");
     return;
   }
   if (allInRunoutReady()) {
     if (street === "River") {
-      $("currentAction").textContent = "河牌行动已完成，可以点击右侧复盘";
+      $("currentAction").textContent = "河牌行动已完成，可以进行牌谱分析";
+      openReviewConfirm("河牌行动已完成，本手牌可以开始牌谱分析。");
       return;
     }
     openDealDialog();
@@ -2093,7 +2111,8 @@ function completeStreet() {
     return;
   }
   if (street === "River") {
-    $("currentAction").textContent = "河牌行动已完成，可以点击右侧复盘";
+    $("currentAction").textContent = "河牌行动已完成，可以进行牌谱分析";
+    openReviewConfirm("河牌行动已完成，本手牌可以开始牌谱分析。");
     return;
   }
   openDealDialog();
@@ -2169,7 +2188,7 @@ function addPlayerToSeat() {
 }
 
 function bind() {
-  ["seatDialog", "dealDialog", "returnDialog", "reviewDialog", "recordDialog"].forEach(id => {
+  ["seatDialog", "dealDialog", "returnDialog", "reviewDialog", "recordDialog", "reviewConfirmDialog"].forEach(id => {
     $(id).addEventListener("close", () => handleDialogClosed($(id)));
   });
 
@@ -2234,6 +2253,10 @@ function bind() {
     } catch (error) {
       renderReviewError(error.message || "无法完成牌谱分析。请检查会员权限和服务端配置。");
     }
+  });
+  $("startReviewFromConfirm").addEventListener("click", async () => {
+    closeDialog($("reviewConfirmDialog"));
+    await analyzeHand();
   });
   $("adminLogin").addEventListener("click", adminLogin);
   $("accountLogin").addEventListener("click", accountLogin);
@@ -2366,28 +2389,6 @@ function bind() {
 
   $("confirmDeal").addEventListener("click", confirmDeal);
 
-  $("exportJson").addEventListener("click", () => {
-    const payload = {
-      playerCount: occupiedPlayerCount(),
-      blinds: $("blinds").value,
-      ante: Number($("anteAmount").value || 0),
-      straddle: {
-        finiteAmount: Number($("straddleAmount").value || 0),
-        unlimited: $("unlimitedStraddle").checked
-      },
-      heroCards: $("heroCards").value,
-      board: boardSummary(),
-      seats: state.seats,
-      actions: state.actions
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "poker-hand-review.json";
-    link.click();
-    URL.revokeObjectURL(url);
-  });
 }
 
 bind();
