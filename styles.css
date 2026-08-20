@@ -963,6 +963,21 @@ label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
   border-color: var(--line);
 }
 
+.bet-shortcuts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.bet-shortcuts button {
+  min-height: 34px;
+  padding: 0 4px;
+  border-radius: 8px;
+  color: #ffe1a0;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .toggle-row {
   display: grid;
   grid-template-columns: auto 1fr;

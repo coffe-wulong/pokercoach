@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>德州扑克手牌复盘器</title>
-  <link rel="stylesheet" href="./styles.css?v=20260820a">
+  <link rel="stylesheet" href="./styles.css?v=20260820b">
 </head>
 <body>
   <section id="loginPage" class="login-page">
@@ -220,6 +220,12 @@
 
         <label id="amountWrap">行动金额
           <input id="actionAmount" type="number" min="0" step="1" value="6">
+          <div id="betShortcutPicks" class="bet-shortcuts" aria-label="快捷下注">
+            <button type="button" data-pot-bet="0.333">1/3底池</button>
+            <button type="button" data-pot-bet="0.5">1/2底池</button>
+            <button type="button" data-pot-bet="0.667">2/3底池</button>
+            <button type="button" data-pot-bet="1">满池</button>
+          </div>
         </label>
         <button type="button" id="recordAction" class="primary wide">记录行动</button>
 
@@ -368,6 +374,6 @@
     <button type="button" data-tab="players">玩家信息</button>
   </nav>
 
-  <script src="./app.js?v=20260820a"></script>
+  <script src="./app.js?v=20260820b"></script>
 </body>
 </html>

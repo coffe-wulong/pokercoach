@@ -841,13 +841,10 @@ function normalizeStreetCallAmounts(street = currentStreet()) {
       .filter(({ action }) => !["ante", "check", "fold"].includes(action.type))
       .map(({ action }) => amountFor(action))
   );
-  const finalAggressor = [...streetEntries]
-    .reverse()
-    .find(({ action }) => ["raise", "straddle", "blind", "allin"].includes(action.type) && amountFor(action) === finalTarget);
-
-  streetEntries.forEach(({ action, index }) => {
+  streetEntries.forEach(({ action }) => {
     if (action.forced && !action.manual) return;
     if (["check", "fold", "allin"].includes(action.type)) return;
+    if (action.type !== "call") return;
     if (amountFor(action) >= finalTarget) return;
     const previousAmount = action.callToAmount || amountFor(action);
     if (previousAmount > 0 && !action.previousAction) {
@@ -856,15 +853,8 @@ function normalizeStreetCallAmounts(street = currentStreet()) {
         amount: previousAmount
       };
     }
-    if (action.type === "raise" && index !== finalAggressor?.index) {
-      action.type = "call";
-      action.forced = false;
-      action.manual = false;
-    }
-    if (["call", "raise", "straddle"].includes(action.type)) {
-      action.amount = finalTarget;
-      action.callToAmount = finalTarget;
-    }
+    action.amount = finalTarget;
+    action.callToAmount = finalTarget;
   });
 }
 
@@ -896,13 +886,24 @@ function handEndedByFolds() {
 function allInRunoutReady() {
   const live = liveSeatIndexes();
   if (live.length <= 1) return false;
-  return live.filter(index => !seatIsAllIn(index)).length <= 1;
+  const active = live.filter(index => !seatIsAllIn(index));
+  if (!active.length) return true;
+  if (active.length > 1) return false;
+  const target = targetAmountForStreet(currentStreet());
+  if (target <= 0) return false;
+  const investments = streetInvestments(currentStreet());
+  return (investments[active[0]] || 0) >= target;
 }
 
 function playersMissingAction(street = currentStreet()) {
   if (handEndedByFolds() || allInRunoutReady()) return [];
   const acted = new Set(actionsForStreet(street).filter(action => !action.forced).map(action => action.seatIndex));
-  return activeSeatIndexes().filter(index => !acted.has(index));
+  const investments = streetInvestments(street);
+  const target = targetAmountForStreet(street);
+  return activeSeatIndexes().filter(index => {
+    if (target > 0 && (investments[index] || 0) < target) return true;
+    return !acted.has(index);
+  });
 }
 
 function parseBlindAmounts() {
@@ -1371,6 +1372,22 @@ function updateActionAmountVisibility() {
     button.setAttribute("aria-disabled", String(!legal));
     button.classList.toggle("selected", button.dataset.action === state.selectedAction);
   });
+}
+
+function potBeforeSelectedAction() {
+  const existingIndex = manualActionIndexesForSeat(currentStreet(), state.selectedSeat)[0] ?? -1;
+  return totalsUntil(existingIndex >= 0 ? existingIndex - 1 : state.actions.length - 1).pot;
+}
+
+function applyPotShortcut(ratio) {
+  if (state.selectedAction !== "raise") {
+    state.selectedAction = "raise";
+    updateActionAmountVisibility();
+  }
+  const pot = potBeforeSelectedAction();
+  const callAmount = callAmountForSeat(currentStreet(), state.selectedSeat);
+  const amount = Math.max(callAmount, Math.round(pot * ratio));
+  $("actionAmount").value = amount;
 }
 
 function addAction(type) {
@@ -2213,6 +2230,11 @@ function bind() {
   });
 
   $("recordAction").addEventListener("click", () => addAction(state.selectedAction));
+  $("betShortcutPicks").addEventListener("click", event => {
+    const button = event.target.closest("[data-pot-bet]");
+    if (!button) return;
+    applyPotShortcut(Number(button.dataset.potBet));
+  });
   $("seatDialog").addEventListener("click", event => {
     if (event.target !== $("seatDialog")) return;
     confirmBackdropAction();
