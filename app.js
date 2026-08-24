@@ -113,6 +113,7 @@ const state = {
   session: null,
   lastReviewText: "",
   lastReviewPayload: null,
+  lastReviewRecordId: "",
   seats: buildSeats(9),
   actions: []
 };
@@ -526,7 +527,13 @@ function boardForStreet(street) {
 }
 
 function amountFor(action) {
-  return ["raise", "call", "blind", "ante", "straddle", "allin"].includes(action.type) ? Number(action.amount || 0) : 0;
+  return ["raise", "call", "blind", "ante", "straddle", "allin", "fold"].includes(action.type) ? Number(action.amount || 0) : 0;
+}
+
+function actionStreetTarget(action) {
+  if (Number.isFinite(Number(action.targetAmount))) return Number(action.targetAmount);
+  if (Number.isFinite(Number(action.callToAmount))) return Number(action.callToAmount);
+  return amountFor(action);
 }
 
 function totalsUntil(step) {
@@ -563,11 +570,15 @@ function actionLabel(action) {
       : previous.type === "call"
         ? `先跟注 ${previous.amount}`
         : `先${map[previous.type] || previous.type} ${previous.amount}`;
-    const target = action.callToAmount || amountFor(action);
+    const target = actionStreetTarget(action);
     const extra = Math.max(0, target - Number(previous.amount || 0));
     return `${position}${action.playerId} ${previousLabel}，后跟注到 ${target}${extra ? `（补 ${extra}）` : ""}`;
   }
-  const amount = amountFor(action);
+  const amount = ["raise", "call"].includes(action.type) ? actionStreetTarget(action) : amountFor(action);
+  if (action.type === "fold") {
+    const committed = actionStreetTarget(action);
+    return `${position}${action.playerId} ${map[action.type]}${committed > amount ? `（已投入 ${committed}）` : amount ? `（已投入 ${amount}）` : ""}`;
+  }
   return `${position}${action.playerId} ${map[action.type]}${amount ? ` ${amount}` : ""}`;
 }
 
@@ -583,11 +594,16 @@ function actionSummary(action, increment = amountFor(action)) {
     blind: action.blind === "SB" ? "小盲" : "大盲"
   };
   if (action.previousAction) {
-    const target = action.callToAmount || amountFor(action);
+    const target = actionStreetTarget(action);
     const extra = Math.max(0, target - Number(action.previousAction.amount || 0));
     return `跟到 ${target}${extra ? ` 补${extra}` : ""}`;
   }
-  return `${map[action.type] || action.type}${increment ? ` ${increment}` : ""}`;
+  if (action.type === "fold") {
+    const committed = actionStreetTarget(action);
+    return `${map[action.type] || action.type}${committed ? ` 已投入${committed}` : ""}`;
+  }
+  const displayAmount = ["raise", "call"].includes(action.type) ? actionStreetTarget(action) : increment;
+  return `${map[action.type] || action.type}${displayAmount ? ` ${displayAmount}` : ""}`;
 }
 
 function actionsWithAmounts(actions = state.actions) {
@@ -599,17 +615,15 @@ function actionsWithAmounts(actions = state.actions) {
     const totalKey = String(action.seatIndex);
     const previousTotalInvested = totalInvested[totalKey] || 0;
     const playerStack = Number(state.seats[action.seatIndex]?.stack || 0);
-    const target = action.callToAmount || amountFor(action);
+    const target = actionStreetTarget(action);
     const previousActionAmount = Number(action.previousAction?.amount || 0);
-    const incrementAmount = action.previousAction
-      ? Math.max(0, target - previousActionAmount)
-      : amountFor(action);
-    const committedAmount = action.previousAction ? target : amountFor(action);
-    const stackBeforeAction = Math.max(0, playerStack - previousTotalInvested - previousActionAmount);
-    const stackAfterAction = Math.max(0, playerStack - previousTotalInvested - committedAmount);
-    const streetTotal = previousStreetTotal + committedAmount;
+    const incrementAmount = amountFor(action);
+    const committedAmount = Math.max(previousStreetTotal + amountFor(action), target);
+    const stackBeforeAction = Math.max(0, playerStack - previousTotalInvested - (action.previousAction ? previousActionAmount : 0));
+    const stackAfterAction = Math.max(0, playerStack - previousTotalInvested - amountFor(action));
+    const streetTotal = previousStreetTotal + amountFor(action);
     streetTotals[streetKey] = streetTotal;
-    totalInvested[totalKey] = previousTotalInvested + committedAmount;
+    totalInvested[totalKey] = previousTotalInvested + amountFor(action);
     return {
       ...action,
       previousAction: action.previousAction || null,
@@ -652,6 +666,9 @@ function resetHandProgress() {
   state.selectedDealCard = 0;
   state.board = { flop: "", turn: "", river: "" };
   state.actions = [];
+  state.lastReviewText = "";
+  state.lastReviewPayload = null;
+  state.lastReviewRecordId = "";
 }
 
 function resetHandToStart() {
@@ -741,6 +758,18 @@ function streetInvestments(street = currentStreet()) {
   }, {});
 }
 
+function streetCommittedBySeat(street = currentStreet(), seatIndex = state.selectedSeat, ignoredIndex = -1, beforeIndex = state.actions.length) {
+  return state.actions.reduce((total, action, index) => {
+    if (
+      index >= beforeIndex
+      || index === ignoredIndex
+      || action.street !== street
+      || action.seatIndex !== seatIndex
+    ) return total;
+    return total + amountFor(action);
+  }, 0);
+}
+
 function manualActionIndexesForSeat(street = currentStreet(), seatIndex = state.selectedSeat) {
   return state.actions
     .map((action, index) => ({ action, index }))
@@ -804,7 +833,7 @@ function targetAmountForStreet(street = currentStreet(), ignoredIndex = -1) {
         && action.street === street
         && !["ante", "check", "fold"].includes(action.type)
       ))
-      .map(amountFor)
+      .map(actionStreetTarget)
   );
 }
 
@@ -818,7 +847,7 @@ function targetAmountBeforeAction(street, beforeIndex, ignoredIndex = -1) {
         && action.street === street
         && !["ante", "check", "fold"].includes(action.type)
       ))
-      .map(amountFor)
+      .map(actionStreetTarget)
   );
 }
 
@@ -846,25 +875,7 @@ function legalActionsForSeat(street = currentStreet(), seatIndex = state.selecte
 }
 
 function normalizeStreetCallAmounts(street = currentStreet()) {
-  const streetEntries = state.actions
-    .map((action, index) => ({ action, index }))
-    .filter(({ action }) => action.street === street);
-  streetEntries.forEach(({ action, index }) => {
-    if (action.forced && !action.manual) return;
-    if (["check", "fold", "allin"].includes(action.type)) return;
-    if (action.type !== "call") return;
-    const targetAtActionTime = targetAmountBeforeAction(street, index);
-    if (targetAtActionTime <= 0 || amountFor(action) >= targetAtActionTime) return;
-    const previousAmount = action.callToAmount || amountFor(action);
-    if (previousAmount > 0 && !action.previousAction) {
-      action.previousAction = {
-        type: action.type,
-        amount: previousAmount
-      };
-    }
-    action.amount = targetAtActionTime;
-    action.callToAmount = targetAtActionTime;
-  });
+  return street;
 }
 
 function refreshFoldedStates() {
@@ -1414,20 +1425,45 @@ function addAction(type) {
   const existingIndex = existingIndexes[0] ?? -1;
   const existingAction = existingIndex >= 0 ? state.actions[existingIndex] : null;
   const actionIndex = existingIndex >= 0 ? existingIndex : state.actions.length;
+  const committedBeforeAction = streetCommittedBySeat(street, index, existingIndex, actionIndex);
+  const previousCommitted = existingAction ? committedBeforeAction + amountFor(existingAction) : committedBeforeAction;
   const previousAction = type === "call" && existingAction && !["call", "check", "fold"].includes(existingAction.type)
     ? {
         type: existingAction.previousAction?.type || existingAction.type,
-        amount: existingAction.previousAction?.amount || amountFor(existingAction)
+        amount: existingAction.previousAction?.amount || previousCommitted
       }
-    : type === "call" && existingAction?.type === "call" && callAmountForSeat(street, index) > amountFor(existingAction)
+    : type === "call" && existingAction?.type === "call" && callAmountForSeat(street, index) > actionStreetTarget(existingAction)
       ? {
           type: "call",
-          amount: existingAction.callToAmount || amountFor(existingAction)
+          amount: existingAction.callToAmount || actionStreetTarget(existingAction)
         }
     : type === "call" && existingAction?.previousAction
       ? existingAction.previousAction
       : null;
-  const callTarget = type === "call" ? callAmountForSeat(street, index) : 0;
+  const callTarget = type === "call"
+    ? existingIndex >= 0
+      ? callAmountForSeat(street, index)
+      : committedBeforeAction + callAmountForSeat(street, index)
+    : 0;
+  const raiseTarget = type === "raise" ? Math.max(0, Number($("actionAmount").value || 0)) : 0;
+  const actionAmount = type === "raise"
+    ? Math.max(0, raiseTarget - committedBeforeAction)
+    : type === "call"
+      ? Math.max(0, callTarget - committedBeforeAction)
+      : type === "allin"
+        ? remainingStackForSeat(index, existingIndex)
+      : type === "straddle"
+        ? straddleAmount()
+        : type === "fold" && existingAction
+          ? amountFor(existingAction)
+          : 0;
+  const targetAmount = type === "raise"
+    ? raiseTarget
+    : type === "call"
+      ? callTarget
+      : type === "allin" || type === "straddle" || type === "fold"
+        ? committedBeforeAction + actionAmount
+        : committedBeforeAction;
   const action = {
     street: currentStreet(),
     seatIndex: index,
@@ -1436,15 +1472,8 @@ function addAction(type) {
     type,
     forced: type === "straddle",
     manual: type === "straddle",
-    amount: type === "raise"
-      ? Number($("actionAmount").value || 0)
-      : type === "call"
-        ? callTarget
-        : type === "allin"
-          ? remainingStackForSeat(index, existingIndex)
-        : type === "straddle"
-          ? straddleAmount()
-          : 0
+    amount: actionAmount,
+    targetAmount
   };
   if (previousAction) {
     action.previousAction = previousAction;
@@ -1562,11 +1591,15 @@ function boardSummary() {
 
 function missingActionSummary(street = currentStreet()) {
   const positions = positionsForSeats();
+  const investments = streetInvestments(street);
+  const target = targetAmountForStreet(street);
   return playersMissingAction(street).map(index => ({
     seat: index + 1,
     position: positions[index],
     playerId: state.seats[index]?.id || "",
-    reason: "该玩家在当前街还没有主动行动记录"
+    reason: target > 0 && (investments[index] || 0) < target
+      ? `该玩家当前街已投入 ${investments[index] || 0}，需要对 ${target} 的目标金额重新决策`
+      : "该玩家在当前街还没有主动行动记录"
   }));
 }
 
@@ -1629,7 +1662,7 @@ function handPayload() {
           actionKind: action.forced && !action.manual ? "forced_post" : "player_decision",
           forcedMeaning: action.forced && !action.manual ? "强制投入，例如 ante / SB / BB；这不是玩家主动决策" : "",
           amount: amountFor(action),
-          targetAmount: action.callToAmount || amountFor(action),
+          targetAmount: actionStreetTarget(action),
           incrementAmount: action.incrementAmount,
           stackBeforeAction: action.stackBeforeAction,
           stackAfterAction: action.stackAfterAction,
@@ -1664,7 +1697,7 @@ function reviewPrompt(payload) {
     "如果信息不足，请明确指出缺失信息，并基于已有信息给出条件化判断。",
     "行动数据里 actionKind=forced_post 表示强制投入，例如 ante / SB / BB，这不是玩家主动行动；actionKind=player_decision 才是玩家主动决策。不要把盲注强制投入误读为该玩家已经主动行动。",
     "只有 missingActionsOnCurrentStreet 明确列出的玩家，才可以被判定为当前街缺少主动行动。不要凭位置顺序猜测某玩家漏行动；如果 missingActionsOnCurrentStreet 为空，就不要输出“某玩家没有行动导致牌路逻辑缺失”。",
-    "注意行动数据中的 previousAction / incrementAmount / targetAmount：如果一名玩家先 open 或跟注，后面面对 3B/再加注自动补跟，请理解为该玩家先前已有投入，之后补到 targetAmount，不要误判为该玩家与后位玩家同时加注到同一金额。",
+    "注意行动数据中的 previousAction / incrementAmount / targetAmount：如果一名玩家先 open 或跟注，后面面对 3B/再加注再次行动，请理解为该玩家先前已有投入，之后补到 targetAmount，不要误判为该玩家与后位玩家同时加注到同一金额。",
     "每条行动还包含 stackBeforeAction / stackAfterAction / behindBeforeAction / behindAfterAction，请用行动当下的后手筹码评估下注尺度、SPR、是否承诺底池以及 all-in 压力。",
     "当翻前 open 是 3-20BB，尤其 17BB 左右时，请视为该局常规环境参数，而不是自动标记为过大失误；只有在结合后手、位置、对手范围、赔率后确实不合理时，才指出问题。",
     "",
@@ -1776,17 +1809,33 @@ function savePlayerRecord(player) {
   renderPlayerInfoList();
 }
 
-function savePlayersFromPayload(payload, favoriteRecord) {
+function reviewHandRecord(payload, reviewText, overrides = {}) {
+  const id = overrides.id || state.lastReviewRecordId || `hand-${Date.now()}`;
+  state.lastReviewRecordId = id;
+  return {
+    id,
+    createdAt: overrides.createdAt || new Date().toISOString(),
+    title: handTitle(payload),
+    payload,
+    reviewText,
+    favorite: Boolean(overrides.favorite)
+  };
+}
+
+function savePlayersFromPayload(payload, handRecord) {
   const records = playerRecords();
   payload.players.filter(player => !player.empty && player.id && !isSystemPlayerId(player.id)).forEach(player => {
     const id = normalizePlayerId(player.id);
     const key = playerRecordKey(id);
     const previous = records[key] || { id, handCount: 0, hands: [], firstSeenAt: new Date().toISOString() };
-    const hands = Array.isArray(previous.hands) ? previous.hands.filter(hand => hand.favoriteId !== favoriteRecord.id) : [];
+    const hands = Array.isArray(previous.hands)
+      ? previous.hands.filter(hand => (hand.recordId || hand.favoriteId) !== handRecord.id)
+      : [];
     hands.unshift({
-      favoriteId: favoriteRecord.id,
-      title: favoriteRecord.title,
-      createdAt: favoriteRecord.createdAt,
+      recordId: handRecord.id,
+      favoriteId: handRecord.favorite ? handRecord.id : "",
+      title: handRecord.title,
+      createdAt: handRecord.createdAt,
       position: player.position,
       style: player.style,
       stack: player.stack,
@@ -1795,7 +1844,7 @@ function savePlayersFromPayload(payload, favoriteRecord) {
       folded: player.folded,
       actions: playerHandActions(payload, player.id),
       handSummary: playerHandSnapshot(payload, player.id),
-      reviewText: favoriteRecord.reviewText
+      reviewText: handRecord.reviewText
     });
     records[key] = {
       ...previous,
@@ -1815,14 +1864,8 @@ function savePlayersFromPayload(payload, favoriteRecord) {
 function saveFavoriteHand() {
   if (!state.lastReviewText || !state.lastReviewPayload) return;
   const records = favoriteRecords();
-  const record = {
-    id: `hand-${Date.now()}`,
-    createdAt: new Date().toISOString(),
-    title: handTitle(state.lastReviewPayload),
-    payload: state.lastReviewPayload,
-    reviewText: state.lastReviewText
-  };
-  writeStorage(storageKeys.favorites, [record, ...records]);
+  const record = reviewHandRecord(state.lastReviewPayload, state.lastReviewText, { favorite: true });
+  writeStorage(storageKeys.favorites, [record, ...records.filter(item => item.id !== record.id)]);
   savePlayersFromPayload(state.lastReviewPayload, record);
   renderFavoriteList();
   $("favoriteReview").textContent = "已收藏";
@@ -1947,9 +1990,9 @@ function renderPlayerDetail(player) {
           <strong>${escapeHtml(hand.title)}</strong>
           <span>${escapeHtml(formatDateTime(hand.createdAt))} · ${escapeHtml(hand.position || "")} · 投入 ${escapeHtml(hand.invested || 0)} · ${hand.folded ? "已弃牌" : "未弃牌"}</span>
           ${hand.actions?.length ? `<ol>${hand.actions.map(action => `<li>${escapeHtml(action)}</li>`).join("")}</ol>` : "<p>暂无该玩家行动记录</p>"}
-          <button type="button" data-view-favorite="${escapeHtml(hand.favoriteId)}">查看完整手牌</button>
+          ${hand.favoriteId ? `<button type="button" data-view-favorite="${escapeHtml(hand.favoriteId)}">查看完整手牌</button>` : "<span class=\"mini-note\">这手牌未收藏，已用于玩家画像记录。</span>"}
         </article>
-      `).join("") : "<p>暂无关联手牌。收藏包含此 ID 的复盘后会出现在这里。</p>"}
+      `).join("") : "<p>暂无关联手牌。完成包含此 ID 的牌谱分析后会出现在这里。</p>"}
     </div>
   `;
   showDialog($("recordDialog"));
@@ -2116,6 +2159,7 @@ async function runDeepSeekReview() {
   const text = data.text;
   state.lastReviewText = text || "模型没有返回文本。";
   renderReviewMarkdown(text || "模型没有返回文本。");
+  savePlayersFromPayload(payload, reviewHandRecord(payload, state.lastReviewText));
 }
 
 function completeStreet() {

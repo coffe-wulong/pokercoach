@@ -352,6 +352,11 @@ textarea {
   line-height: 1.45;
 }
 
+.mini-hand .mini-note {
+  justify-self: start;
+  padding: 6px 0;
+}
+
 .mini-hand ol {
   margin: 0;
   padding-left: 20px;
