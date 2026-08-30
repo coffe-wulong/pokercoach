@@ -571,6 +571,9 @@ function actionLabel(action) {
         ? `先跟注 ${previous.amount}`
         : `先${map[previous.type] || previous.type} ${previous.amount}`;
     const target = actionStreetTarget(action);
+    if (action.type === "fold") {
+      return `${position}${action.playerId} ${previousLabel}，后弃牌${target ? `（已投入 ${target}）` : ""}`;
+    }
     const extra = Math.max(0, target - Number(previous.amount || 0));
     return `${position}${action.playerId} ${previousLabel}，后跟注到 ${target}${extra ? `（补 ${extra}）` : ""}`;
   }
@@ -595,6 +598,7 @@ function actionSummary(action, increment = amountFor(action)) {
   };
   if (action.previousAction) {
     const target = actionStreetTarget(action);
+    if (action.type === "fold") return `弃牌${target ? ` 已投入${target}` : ""}`;
     const extra = Math.max(0, target - Number(action.previousAction.amount || 0));
     return `跟到 ${target}${extra ? ` 补${extra}` : ""}`;
   }
@@ -619,7 +623,8 @@ function actionsWithAmounts(actions = state.actions) {
     const previousActionAmount = Number(action.previousAction?.amount || 0);
     const incrementAmount = amountFor(action);
     const committedAmount = Math.max(previousStreetTotal + amountFor(action), target);
-    const stackBeforeAction = Math.max(0, playerStack - previousTotalInvested - (action.previousAction ? previousActionAmount : 0));
+    const previousActionExtra = action.previousAction ? Math.max(0, previousActionAmount - previousStreetTotal) : 0;
+    const stackBeforeAction = Math.max(0, playerStack - previousTotalInvested - previousActionExtra);
     const stackAfterAction = Math.max(0, playerStack - previousTotalInvested - amountFor(action));
     const streetTotal = previousStreetTotal + amountFor(action);
     streetTotals[streetKey] = streetTotal;
@@ -758,6 +763,14 @@ function streetInvestments(street = currentStreet()) {
   }, {});
 }
 
+function streetBettingInvestments(street = currentStreet()) {
+  return actionsForStreet(street).reduce((totals, action) => {
+    if (action.type === "ante") return totals;
+    totals[action.seatIndex] = (totals[action.seatIndex] || 0) + amountFor(action);
+    return totals;
+  }, {});
+}
+
 function streetCommittedBySeat(street = currentStreet(), seatIndex = state.selectedSeat, ignoredIndex = -1, beforeIndex = state.actions.length) {
   return state.actions.reduce((total, action, index) => {
     if (
@@ -765,6 +778,19 @@ function streetCommittedBySeat(street = currentStreet(), seatIndex = state.selec
       || index === ignoredIndex
       || action.street !== street
       || action.seatIndex !== seatIndex
+    ) return total;
+    return total + amountFor(action);
+  }, 0);
+}
+
+function streetBettingCommittedBySeat(street = currentStreet(), seatIndex = state.selectedSeat, ignoredIndex = -1, beforeIndex = state.actions.length) {
+  return state.actions.reduce((total, action, index) => {
+    if (
+      index >= beforeIndex
+      || index === ignoredIndex
+      || action.street !== street
+      || action.seatIndex !== seatIndex
+      || action.type === "ante"
     ) return total;
     return total + amountFor(action);
   }, 0);
@@ -795,9 +821,10 @@ function investmentsBeforeAction(street, beforeIndex = state.actions.length, ign
 }
 
 function currentCallAmount(street = currentStreet(), seatIndex = state.selectedSeat, ignoredIndex = -1, beforeIndex = state.actions.length) {
-  const investments = investmentsBeforeAction(street, beforeIndex, ignoredIndex);
-  const target = Math.max(0, ...Object.values(investments));
-  const invested = seatIndex === null || seatIndex === undefined ? 0 : investments[seatIndex] || 0;
+  const target = targetAmountBeforeAction(street, beforeIndex, ignoredIndex);
+  const invested = seatIndex === null || seatIndex === undefined
+    ? 0
+    : streetBettingCommittedBySeat(street, seatIndex, ignoredIndex, beforeIndex);
   return Math.max(0, target - invested);
 }
 
@@ -831,7 +858,7 @@ function targetAmountForStreet(street = currentStreet(), ignoredIndex = -1) {
       .filter((action, index) => (
         index !== ignoredIndex
         && action.street === street
-        && !["ante", "check", "fold"].includes(action.type)
+        && !["ante", "check", "call", "fold"].includes(action.type)
       ))
       .map(actionStreetTarget)
   );
@@ -845,7 +872,7 @@ function targetAmountBeforeAction(street, beforeIndex, ignoredIndex = -1) {
         index < beforeIndex
         && index !== ignoredIndex
         && action.street === street
-        && !["ante", "check", "fold"].includes(action.type)
+        && !["ante", "check", "call", "fold"].includes(action.type)
       ))
       .map(actionStreetTarget)
   );
@@ -853,10 +880,12 @@ function targetAmountBeforeAction(street, beforeIndex, ignoredIndex = -1) {
 
 function callAmountForSeat(street = currentStreet(), seatIndex = state.selectedSeat) {
   const existingIndex = manualActionIndexesForSeat(street, seatIndex)[0] ?? -1;
-  if (existingIndex >= 0) {
-    return targetAmountForStreet(street, existingIndex);
-  }
-  return currentCallAmount(street, seatIndex);
+  const beforeIndex = existingIndex >= 0 ? existingIndex : state.actions.length;
+  const target = targetAmountForStreet(street, existingIndex);
+  const invested = seatIndex === null || seatIndex === undefined
+    ? 0
+    : streetBettingCommittedBySeat(street, seatIndex, existingIndex, beforeIndex);
+  return Math.max(0, target - invested);
 }
 
 function legalActionsForSeat(street = currentStreet(), seatIndex = state.selectedSeat) {
@@ -865,12 +894,14 @@ function legalActionsForSeat(street = currentStreet(), seatIndex = state.selecte
   const callAmount = callAmountForSeat(street, seatIndex);
   const remaining = seatIndex === null || seatIndex === undefined ? 0 : remainingStackForSeat(seatIndex, existingIndex);
   const canStraddle = street === "Preflop" && $("unlimitedStraddle").checked;
+  const straddle = straddleAmount();
   return new Set([
     ...(callAmount <= 0 ? ["check"] : []),
     "fold",
-    ...(callAmount > 0 ? ["call"] : []),
-    ...(remaining > 0 ? ["raise", "allin"] : []),
-    ...(canStraddle && remaining > 0 ? ["straddle"] : [])
+    ...(callAmount > 0 && remaining >= callAmount ? ["call"] : []),
+    ...(remaining > callAmount ? ["raise"] : []),
+    ...(remaining > 0 ? ["allin"] : []),
+    ...(canStraddle && remaining >= straddle ? ["straddle"] : [])
   ]);
 }
 
@@ -911,14 +942,14 @@ function allInRunoutReady() {
   if (active.length > 1) return false;
   const target = targetAmountForStreet(currentStreet());
   if (target <= 0) return false;
-  const investments = streetInvestments(currentStreet());
+  const investments = streetBettingInvestments(currentStreet());
   return (investments[active[0]] || 0) >= target;
 }
 
 function playersMissingAction(street = currentStreet()) {
   if (handEndedByFolds() || allInRunoutReady()) return [];
   const acted = new Set(actionsForStreet(street).filter(action => !action.forced).map(action => action.seatIndex));
-  const investments = streetInvestments(street);
+  const investments = streetBettingInvestments(street);
   const target = targetAmountForStreet(street);
   return activeSeatIndexes().filter(index => {
     if (target > 0 && (investments[index] || 0) < target) return true;
@@ -1340,9 +1371,11 @@ function openSeatDialog(index) {
     $("playerStyle").value = player.style;
     $("playerId").value = player.id;
     $("playerDealer").checked = Boolean(player.dealer);
+    const existingIndex = manualActionIndexesForSeat(currentStreet(), index)[0] ?? -1;
+    const currentTarget = targetAmountForStreet(currentStreet(), existingIndex);
     $("actionAmount").value = existingAction?.type === "raise"
-      ? existingAction.amount
-      : callAmountForSeat(currentStreet(), index) || 6;
+      ? actionStreetTarget(existingAction)
+      : Math.max(currentTarget > 0 ? currentTarget + 1 : 1, 6);
     updateActionAmountVisibility();
   } else {
     $("newPlayerId").value = `P${index + 1}`;
@@ -1405,8 +1438,9 @@ function applyPotShortcut(ratio) {
     updateActionAmountVisibility();
   }
   const pot = potBeforeSelectedAction();
-  const callAmount = callAmountForSeat(currentStreet(), state.selectedSeat);
-  const amount = Math.max(callAmount, Math.round(pot * ratio));
+  const existingIndex = manualActionIndexesForSeat(currentStreet(), state.selectedSeat)[0] ?? -1;
+  const currentTarget = targetAmountForStreet(currentStreet(), existingIndex);
+  const amount = Math.max(currentTarget > 0 ? currentTarget + 1 : 1, Math.round(pot * ratio));
   $("actionAmount").value = amount;
 }
 
@@ -1425,9 +1459,14 @@ function addAction(type) {
   const existingIndex = existingIndexes[0] ?? -1;
   const existingAction = existingIndex >= 0 ? state.actions[existingIndex] : null;
   const actionIndex = existingIndex >= 0 ? existingIndex : state.actions.length;
-  const committedBeforeAction = streetCommittedBySeat(street, index, existingIndex, actionIndex);
+  const committedBeforeAction = streetBettingCommittedBySeat(street, index, existingIndex, actionIndex);
   const previousCommitted = existingAction ? committedBeforeAction + amountFor(existingAction) : committedBeforeAction;
-  const previousAction = type === "call" && existingAction && !["call", "check", "fold"].includes(existingAction.type)
+  const previousAction = type === "fold" && existingAction
+    ? {
+        type: existingAction.previousAction?.type || existingAction.type,
+        amount: existingAction.previousAction?.amount || previousCommitted
+      }
+    : type === "call" && existingAction && !["call", "check", "fold"].includes(existingAction.type)
     ? {
         type: existingAction.previousAction?.type || existingAction.type,
         amount: existingAction.previousAction?.amount || previousCommitted
@@ -1441,11 +1480,20 @@ function addAction(type) {
       ? existingAction.previousAction
       : null;
   const callTarget = type === "call"
-    ? existingIndex >= 0
-      ? callAmountForSeat(street, index)
-      : committedBeforeAction + callAmountForSeat(street, index)
+    ? targetAmountForStreet(street, existingIndex)
     : 0;
+  const currentTarget = targetAmountForStreet(street, existingIndex);
   const raiseTarget = type === "raise" ? Math.max(0, Number($("actionAmount").value || 0)) : 0;
+  if (type === "raise" && raiseTarget <= currentTarget) {
+    $("currentAction").textContent = currentTarget > 0
+      ? `加注金额必须大于当前需要跟到的 ${currentTarget}`
+      : "下注金额必须大于 0";
+    return;
+  }
+  if (type === "raise" && raiseTarget > committedBeforeAction + remainingStackForSeat(index, existingIndex)) {
+    $("currentAction").textContent = "加注金额超过剩余筹码，请选择 All-in";
+    return;
+  }
   const actionAmount = type === "raise"
     ? Math.max(0, raiseTarget - committedBeforeAction)
     : type === "call"
@@ -1591,7 +1639,7 @@ function boardSummary() {
 
 function missingActionSummary(street = currentStreet()) {
   const positions = positionsForSeats();
-  const investments = streetInvestments(street);
+  const investments = streetBettingInvestments(street);
   const target = targetAmountForStreet(street);
   return playersMissingAction(street).map(index => ({
     seat: index + 1,
