@@ -2299,6 +2299,7 @@ function bind() {
   });
   $("completeStreet").addEventListener("click", completeStreet);
   $("returnHand").addEventListener("click", openReturnDialog);
+  $("resetHandTop").addEventListener("click", resetHandToStart);
   $("returnPrevRound").addEventListener("click", returnToPreviousRound);
   $("restartHand").addEventListener("click", () => {
     closeDialog($("returnDialog"));
