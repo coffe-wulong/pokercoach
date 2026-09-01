@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>德州扑克手牌复盘器</title>
-  <link rel="stylesheet" href="./styles.css?v=20260830b">
+  <link rel="stylesheet" href="./styles.css?v=20260901b">
 </head>
 <body>
   <section id="loginPage" class="login-page">
@@ -352,6 +352,35 @@
       <div class="dialog-body">
         <p class="dialog-copy">本手牌行动已经完成，可以现在进行牌谱分析。</p>
         <button type="button" id="startReviewFromConfirm" class="primary wide">牌谱分析</button>
+        <button type="button" id="openShowdownFromConfirm" class="wide">输入其他玩家底牌进行分析</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="showdownDialog" class="seat-dialog showdown-dialog">
+    <form method="dialog">
+      <header class="dialog-head">
+        <div>
+          <p class="eyebrow">摊牌信息</p>
+          <h2 id="showdownTitle">输入其他玩家底牌</h2>
+        </div>
+        <button value="close" class="icon-btn" title="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <p id="showdownHint" class="dialog-copy">只填写你知道的底牌，不知道的玩家保持未知即可。</p>
+        <div id="showdownPlayers" class="showdown-players"></div>
+        <div id="showdownPicker" class="showdown-picker" hidden>
+          <div id="showdownCards" class="deal-cards"></div>
+          <div>
+            <p class="picker-title">选择数字</p>
+            <div id="showdownRankPicker" class="picker-grid rank-grid"></div>
+          </div>
+          <div>
+            <p class="picker-title">选择花色</p>
+            <div id="showdownSuitPicker" class="picker-grid suit-grid"></div>
+          </div>
+        </div>
+        <button type="button" id="startReviewWithShowdown" class="primary wide">用这些底牌进行分析</button>
       </div>
     </form>
   </dialog>
@@ -375,6 +404,6 @@
     <button type="button" data-tab="players">玩家信息</button>
   </nav>
 
-  <script src="./app.js?v=20260830b"></script>
+  <script src="./app.js?v=20260901b"></script>
 </body>
 </html>

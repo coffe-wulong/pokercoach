@@ -104,6 +104,9 @@ const state = {
   dealTarget: null,
   dealCards: [],
   selectedDealCard: 0,
+  showdownHands: {},
+  showdownEditingSeat: null,
+  selectedShowdownCard: 0,
   board: {
     flop: "",
     turn: "",
@@ -669,6 +672,9 @@ function resetHandProgress() {
   state.dealTarget = null;
   state.dealCards = [];
   state.selectedDealCard = 0;
+  state.showdownHands = {};
+  state.showdownEditingSeat = null;
+  state.selectedShowdownCard = 0;
   state.board = { flop: "", turn: "", river: "" };
   state.actions = [];
   state.lastReviewText = "";
@@ -1101,8 +1107,15 @@ function selectedDeckCards({ includeHero = true, excludeStreet = "", dealCards =
   return [
     ...(includeHero ? $("heroCards").value.trim().split(/\s+/).filter(Boolean) : []),
     ...selectedBoardCards(excludeStreet),
+    ...knownShowdownCards(),
     ...dealCards.map(cardCode).filter(Boolean)
   ];
+}
+
+function knownShowdownCards(excludeSeat = null) {
+  return Object.entries(state.showdownHands || {}).flatMap(([seatIndex, hand]) => (
+    Number(seatIndex) === excludeSeat || !hand?.known ? [] : hand.cards.map(cardCode).filter(Boolean)
+  ));
 }
 
 function currentDeckError() {
@@ -1272,6 +1285,131 @@ function warnDuplicateDealCard() {
   return true;
 }
 
+function liveShowdownSeatIndexes() {
+  return liveSeatIndexes().filter(index => !state.seats[index]?.hero);
+}
+
+function ensureShowdownHand(seatIndex) {
+  const current = state.showdownHands[seatIndex];
+  if (current) return current;
+  state.showdownHands[seatIndex] = {
+    known: false,
+    cards: [
+      { rank: "", suit: "" },
+      { rank: "", suit: "" }
+    ]
+  };
+  return state.showdownHands[seatIndex];
+}
+
+function showdownCardsForSeat(seatIndex) {
+  return ensureShowdownHand(seatIndex).cards;
+}
+
+function selectedShowdownDeckCards(seatIndex) {
+  return [
+    $("heroCards").value.trim().split(/\s+/).filter(Boolean),
+    selectedBoardCards(),
+    knownShowdownCards(seatIndex),
+    showdownCardsForSeat(seatIndex).map(cardCode).filter(Boolean)
+  ].flat();
+}
+
+function showdownHandText(hand) {
+  if (!hand?.known) return "未知底牌";
+  const cards = hand.cards.map(cardCode).filter(Boolean);
+  return cards.length === 2 ? cards.map(cardDisplay).join(" ") : "待选择两张牌";
+}
+
+function renderShowdownCards() {
+  const seatIndex = state.showdownEditingSeat;
+  const hand = seatIndex === null ? null : ensureShowdownHand(seatIndex);
+  const cards = hand?.cards || [];
+  $("showdownCards").innerHTML = cards.map((card, index) => {
+    const parsed = cardCode(card) ? parseCards(cardCode(card))[0] : null;
+    return `
+      <button type="button" class="deal-card ${index === state.selectedShowdownCard ? "selected" : ""}" data-showdown-card="${index}">
+        ${parsed ? cardHtml(parsed) : `<span>第 ${index + 1} 张</span>`}
+      </button>
+    `;
+  }).join("");
+
+  $("showdownRankPicker").innerHTML = ranks.map(rank => `
+    <button type="button" data-showdown-rank="${rank}" class="${cards[state.selectedShowdownCard]?.rank === rank ? "selected" : ""}">${rank}</button>
+  `).join("");
+
+  $("showdownSuitPicker").innerHTML = suits.map(suit => `
+    <button type="button" data-showdown-suit="${suit.code}" class="${cards[state.selectedShowdownCard]?.suit === suit.code ? "selected" : ""}">${suit.label}<span>${suit.name}</span></button>
+  `).join("");
+}
+
+function warnDuplicateShowdownCard() {
+  const seatIndex = state.showdownEditingSeat;
+  const duplicateMessage = duplicateCardMessage(selectedShowdownDeckCards(seatIndex));
+  if (!duplicateMessage) return false;
+  $("showdownTitle").textContent = duplicateMessage;
+  return true;
+}
+
+function renderShowdownDialog() {
+  const positions = positionsForSeats();
+  const seats = liveShowdownSeatIndexes();
+  $("showdownPlayers").innerHTML = seats.length ? seats.map(index => {
+    const player = state.seats[index];
+    const hand = ensureShowdownHand(index);
+    return `
+      <article class="showdown-player ${state.showdownEditingSeat === index ? "active" : ""}">
+        <div>
+          <strong>${escapeHtml(positions[index] || "")} ${escapeHtml(playerDisplayName(player))}</strong>
+          <span>${escapeHtml(showdownHandText(hand))}</span>
+        </div>
+        <div class="showdown-actions">
+          <button type="button" data-showdown-unknown="${index}">未知</button>
+          <button type="button" data-showdown-edit="${index}">输入底牌</button>
+        </div>
+      </article>
+    `;
+  }).join("") : `<div class="empty-state">没有需要补充底牌的其他未弃牌玩家。</div>`;
+  $("showdownPicker").hidden = state.showdownEditingSeat === null;
+  if (state.showdownEditingSeat !== null) renderShowdownCards();
+}
+
+function openShowdownDialog() {
+  state.showdownEditingSeat = liveShowdownSeatIndexes()[0] ?? null;
+  state.selectedShowdownCard = 0;
+  $("showdownTitle").textContent = "输入其他玩家底牌";
+  renderShowdownDialog();
+  showDialog($("showdownDialog"));
+}
+
+function showdownPayload() {
+  const positions = positionsForSeats();
+  return liveSeatIndexes().map(index => {
+    const player = state.seats[index];
+    const hand = state.showdownHands[index];
+    return {
+      seat: index + 1,
+      position: positions[index],
+      playerId: player?.id || "",
+      hero: Boolean(player?.hero),
+      known: Boolean(player?.hero || hand?.known),
+      cards: player?.hero
+        ? $("heroCards").value.trim()
+        : hand?.known
+          ? hand.cards.map(cardCode).join(" ")
+          : "未知"
+    };
+  });
+}
+
+function showdownInputError() {
+  const incomplete = Object.entries(state.showdownHands || {}).find(([, hand]) => (
+    hand?.known && hand.cards.some(card => !card.rank || !card.suit)
+  ));
+  if (incomplete) return "已选择输入底牌的玩家，需要选满两张牌；不知道就点未知。";
+  return duplicateCardMessage(selectedDeckCards());
+}
+
 function seatStreetAction(index) {
   return [...state.actions]
     .reverse()
@@ -1298,8 +1436,13 @@ function renderSeats() {
     }
 
     const left = Math.max(0, Number(player.stack) - (totals[index] || 0));
+    const knownOpponentCards = state.showdownHands[index]?.known
+      ? state.showdownHands[index].cards.map(cardCode).join(" ")
+      : "";
     const cards = player.hero
       ? parseCards($("heroCards").value).map(cardHtml).join("")
+      : knownOpponentCards
+        ? parseCards(knownOpponentCards).map(cardHtml).join("")
       : `<div class="card back">?</div><div class="card back">?</div>`;
     const streetAction = seatStreetAction(index);
     const actionBadge = streetAction ? `
@@ -1656,6 +1799,7 @@ function handPayload() {
   const { pot, totals } = totalsUntil(state.actions.length - 1);
   const enrichedActions = actionsWithAmounts();
   const anteAmount = Number($("anteAmount").value || 0);
+  const showdownHands = showdownPayload();
   return {
     gameProfile: {
       environment: "线下娱乐局",
@@ -1681,6 +1825,8 @@ function handPayload() {
     missingActionsOnCurrentStreet: missingActionSummary(currentStreet()),
     pot,
     heroCards: $("heroCards").value.trim(),
+    hasKnownOpponentCards: showdownHands.some(hand => !hand.hero && hand.known),
+    showdownHands,
     board: boardSummary(),
     players: state.seats.map((player, index) => player ? {
       seat: index + 1,
@@ -1726,31 +1872,23 @@ function handPayload() {
 
 function reviewPrompt(payload) {
   return [
-    "你是一名线下德州扑克娱乐局复盘教练，同时理解 GTO，但分析时必须以线下娱乐局实战为主，GTO 只作为补充参考。",
-    "本工具服务的默认牌局画像是：线下娱乐局，通常有 ante，且 ante 数额由用户在本手牌设置项中填写，取决于当前盲注级别，不是固定 1BB；默认存在无限鱿鱼/血战鱿鱼；翻前 open 3-20BB 都属于正常现场尺度，17BB open 明确属于正常范围，不是异常大额下注。",
-    "严格禁止使用常规线上 2-3BB open 的基准来评价本牌局的翻前尺度。不要写“open 异常大”“open 过大”“不符合常规尺度”这类结论，除非你已经先承认 3-20BB 在该局型中正常，再基于有效筹码、SPR、位置、对手范围和赔率证明该具体动作在实战上亏损。",
-    "有 ante 和无限鱿鱼时，底池天然更大、现场 open 和 3B/4B 尺度天然更大。请使用牌局数据 JSON 中的 ante 实际数额，不要假设 ante 固定为 1BB；请把 ante 和鱿鱼作为环境参数，而不是错误来源。",
-    "以上局型、open 尺度、ante、鱿鱼信息是你的内部分析基准，不要在每一局输出中反复解释“因为这是娱乐局所以 open 10BB/15BB/20BB 合理”。只有当某个尺度本身成为关键决策点时，才简短提到尺度判断。",
-    "请用中文分析这手牌。不要泛泛而谈，必须结合行动线、位置、筹码、玩家风格、底池和公共牌。",
-    "牌力判断必须先精确比较 5 张最佳牌，禁止只看“对手命中两对/成牌”就误判输赢。例如 Hero AK 在 A-K-8-4-5 公共牌上是 AAKK8，两对 A 和 K，明确压制 A8 的 AA88K；不要把 A8 这类较弱两对列为能赢 AK 的组合。列出 Hero 会输/会赢的组合前，必须确认其五张最佳牌确实高于/低于 Hero。",
-    "如果 Hero 手牌和公共牌已经在 payload 中给出，请优先基于确切牌面做摊牌牌力比较，再讨论范围与策略。",
-    "请按以下结构输出：",
-    "1. 手牌摘要：一句话总结局面，不要反复说明娱乐局 open 尺度合理。",
-    "2. 线下实战逐街复盘：Preflop / Flop / Turn / River 分别分析行动线是否合理、关键玩家范围、Hero 范围、对手价值范围、诈唬范围、可用尺度。",
-    "3. 对手范围：按玩家位置列出主要组合类别，不需要穷举全部组合，但要具体到牌型或典型手牌；范围判断要考虑 ante、无限鱿鱼、娱乐局 3-20BB open 和宽松跟注。",
-    "4. 实战建议：优先给出在线下娱乐局里更赚钱、更稳健的推荐动作、下注尺度、继续/弃牌阈值。",
-    "5. GTO 参考：单独说明理论基准与当前娱乐局偏离在哪里，不要用 GTO 结论覆盖实战建议。",
-    "6. Exploit 调整：结合玩家风格给出针对松凶、紧凶、紧弱、松弱、普通玩家的实战偏离。",
-    "7. 最大错误与下一次复盘重点。",
-    "如果信息不足，请明确指出缺失信息，并基于已有信息给出条件化判断。",
-    "行动数据里 actionKind=forced_post 表示强制投入，例如 ante / SB / BB，这不是玩家主动行动；actionKind=player_decision 才是玩家主动决策。不要把盲注强制投入误读为该玩家已经主动行动。",
-    "只有 missingActionsOnCurrentStreet 明确列出的玩家，才可以被判定为当前街缺少主动行动。不要凭位置顺序猜测某玩家漏行动；如果 missingActionsOnCurrentStreet 为空，就不要输出“某玩家没有行动导致牌路逻辑缺失”。",
-    "注意行动数据中的 previousAction / incrementAmount / targetAmount：如果一名玩家先 open 或跟注，后面面对 3B/再加注再次行动，请理解为该玩家先前已有投入，之后补到 targetAmount，不要误判为该玩家与后位玩家同时加注到同一金额。",
-    "每条行动还包含 stackBeforeAction / stackAfterAction / behindBeforeAction / behindAfterAction，请用行动当下的后手筹码评估下注尺度、SPR、是否承诺底池以及 all-in 压力。",
-    "当翻前 open 是 3-20BB，尤其 17BB 左右时，请视为该局常规环境参数，而不是自动标记为过大失误；只有在结合后手、位置、对手范围、赔率后确实不合理时，才指出问题。",
+    "你是线下德州扑克娱乐局复盘教练。请用中文输出短报告，控制在 900-1300 字，不要长篇铺垫。",
+    "分析基准：线下娱乐局，常见 ante 和无限鱿鱼；ante 使用 payload 里的实际数额，不是固定 1BB；翻前 open 3-20BB 属于常规现场尺度，不要反复解释，也不要套用线上 2-3BB 标准。",
+    "必须结合行动线、位置、有效筹码、底池、玩家风格和公共牌。GTO 只做一句补充，不要展开理论课。",
+    "牌力判断要先精确比较五张最佳牌，避免把被 Hero 压制的弱两对误列为赢牌组合。",
+    "showdownHands 里 known=true 才代表已知底牌；cards=未知 时不要假设具体牌，只能按范围分析。",
+    "如果 hasKnownOpponentCards=true，必须分两层分析：先完全假装不知道对手底牌，只按行动线和范围做实战决策分析；再用已知底牌复盘对手真实思路、打法倾向和暴露的问题。不要用已知底牌倒推第一部分结论。",
+    "actionKind=forced_post 是强制投入，不是主动行动；只有 missingActionsOnCurrentStreet 里的玩家才算漏行动。",
+    "amount 是本次实际投入，targetAmount 是跟到/加注到的目标，previousAction 表示该玩家本街之前已有动作。",
+    "输出格式固定为 5 段：",
+    "1. 摘要：1-2 句。",
+    "2. 未知底牌视角：Preflop/Flop/Turn/River 每街最多 2 句，只按行动线、范围和赔率分析。",
+    "3. 已知底牌复盘：如果有已知对手底牌，说明这些底牌如何解释对手思路、打法倾向和错误；如果没有已知对手底牌，则写“无已知对手底牌”。",
+    "4. 实战建议：给出下一次更赚钱的动作、下注尺度和 exploit 调整。",
+    "5. 最大错误：只列 1-2 个最重要问题。",
     "",
     "牌局数据 JSON：",
-    JSON.stringify(payload, null, 2)
+    JSON.stringify(payload)
   ].join("\n");
 }
 
@@ -2179,7 +2317,7 @@ function openReviewConfirm(message = "本手牌行动已经完成，可以现在
 async function runDeepSeekReview() {
   if (!ensureMemberForReview()) return;
 
-  const deckError = currentDeckError();
+  const deckError = showdownInputError() || currentDeckError();
   if (deckError) {
     renderReviewError(deckError);
     return;
@@ -2194,7 +2332,7 @@ async function runDeepSeekReview() {
       messages: [
         {
           role: "system",
-          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，必须以线下实战盈利和玩家倾向为主，逐街分析行动线、范围和可执行建议；GTO 只作为补充参考。本牌局通常有 ante，但 ante 数额取决于用户在本手牌里填写的实际设置，不是固定 1BB；本牌局默认有无限鱿鱼/血战鱿鱼，翻前 3-20BB open 都属于常见现场尺度，17BB open 明确不是异常大额下注。不得使用常规线上 2-3BB open 基准来判定本局 open 尺度异常。上述局型和尺度只作为内部分析基准，不要在输出中反复解释“娱乐局所以 open 合理”，除非尺度是关键决策点。只有数据的 missingActionsOnCurrentStreet 明确列出玩家时，才可指出当前街缺少主动行动。做摊牌和范围结论前必须准确比较五张最佳牌，不能把被 Hero 压制的弱两对误列为赢牌组合。"
+          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，必须以线下实战盈利和玩家倾向为主，逐街分析行动线、范围和可执行建议；GTO 只作为补充参考。本牌局通常有 ante 和无限鱿鱼，翻前 3-20BB open 属于常见现场尺度，不要反复解释。若 payload.hasKnownOpponentCards=true，必须先按不知道对手底牌的实战视角分析，再用已知底牌复盘对手真实思路和打法倾向；禁止用已知底牌倒推第一部分结论。只有 missingActionsOnCurrentStreet 明确列出玩家时，才可指出漏行动。做摊牌和范围结论前必须准确比较五张最佳牌。"
         },
         {
           role: "user",
@@ -2311,7 +2449,7 @@ function addPlayerToSeat() {
 }
 
 function bind() {
-  ["seatDialog", "dealDialog", "returnDialog", "reviewDialog", "recordDialog", "reviewConfirmDialog"].forEach(id => {
+  ["seatDialog", "dealDialog", "returnDialog", "reviewDialog", "recordDialog", "reviewConfirmDialog", "showdownDialog"].forEach(id => {
     $(id).addEventListener("close", () => handleDialogClosed($(id)));
   });
 
@@ -2386,6 +2524,65 @@ function bind() {
   $("startReviewFromConfirm").addEventListener("click", async () => {
     closeDialog($("reviewConfirmDialog"));
     await analyzeHand();
+  });
+  $("openShowdownFromConfirm").addEventListener("click", () => {
+    closeDialog($("reviewConfirmDialog"));
+    openShowdownDialog();
+  });
+  $("startReviewWithShowdown").addEventListener("click", async () => {
+    const error = showdownInputError();
+    if (error) {
+      $("showdownTitle").textContent = error;
+      return;
+    }
+    closeDialog($("showdownDialog"));
+    await analyzeHand();
+  });
+  $("showdownPlayers").addEventListener("click", event => {
+    const unknownSeat = event.target.closest("[data-showdown-unknown]")?.dataset.showdownUnknown;
+    if (unknownSeat !== undefined) {
+      state.showdownHands[unknownSeat] = {
+        known: false,
+        cards: [
+          { rank: "", suit: "" },
+          { rank: "", suit: "" }
+        ]
+      };
+      if (state.showdownEditingSeat === Number(unknownSeat)) state.showdownEditingSeat = null;
+      $("showdownTitle").textContent = "输入其他玩家底牌";
+      renderShowdownDialog();
+      render();
+      return;
+    }
+    const editSeat = event.target.closest("[data-showdown-edit]")?.dataset.showdownEdit;
+    if (editSeat === undefined) return;
+    state.showdownEditingSeat = Number(editSeat);
+    state.selectedShowdownCard = 0;
+    ensureShowdownHand(state.showdownEditingSeat).known = true;
+    $("showdownTitle").textContent = "输入其他玩家底牌";
+    renderShowdownDialog();
+  });
+  $("showdownCards").addEventListener("click", event => {
+    const button = event.target.closest("[data-showdown-card]");
+    if (!button) return;
+    state.selectedShowdownCard = Number(button.dataset.showdownCard);
+    renderShowdownCards();
+  });
+  $("showdownRankPicker").addEventListener("click", event => {
+    const button = event.target.closest("[data-showdown-rank]");
+    if (!button || state.showdownEditingSeat === null) return;
+    ensureShowdownHand(state.showdownEditingSeat).cards[state.selectedShowdownCard].rank = button.dataset.showdownRank;
+    renderShowdownCards();
+  });
+  $("showdownSuitPicker").addEventListener("click", event => {
+    const button = event.target.closest("[data-showdown-suit]");
+    if (!button || state.showdownEditingSeat === null) return;
+    ensureShowdownHand(state.showdownEditingSeat).cards[state.selectedShowdownCard].suit = button.dataset.showdownSuit;
+    const duplicated = warnDuplicateShowdownCard();
+    if (!duplicated && state.selectedShowdownCard < 1) state.selectedShowdownCard += 1;
+    renderShowdownDialog();
+    render();
+    if (duplicated) warnDuplicateShowdownCard();
   });
   $("adminLogin").addEventListener("click", adminLogin);
   $("accountLogin").addEventListener("click", accountLogin);

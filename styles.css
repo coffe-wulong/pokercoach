@@ -1026,6 +1026,56 @@ label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
   gap: 8px;
 }
 
+.showdown-players {
+  display: grid;
+  gap: 8px;
+}
+
+.showdown-player {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111820;
+}
+
+.showdown-player.active {
+  border-color: var(--gold);
+  background: #302917;
+}
+
+.showdown-player strong,
+.showdown-player span {
+  display: block;
+}
+
+.showdown-player span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.showdown-actions {
+  display: grid;
+  grid-template-columns: repeat(2, auto);
+  gap: 6px;
+}
+
+.showdown-actions button {
+  min-height: 34px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.showdown-picker {
+  display: grid;
+  gap: 10px;
+  padding-top: 4px;
+}
+
 .deal-cards {
   display: flex;
   justify-content: center;
@@ -1882,6 +1932,20 @@ textarea:focus {
   .dialog-body {
     gap: 10px;
     padding: 13px;
+  }
+
+  .showdown-player {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .showdown-actions {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .showdown-dialog .deal-card {
+    width: 58px;
+    min-height: 72px;
   }
 
   .action-picks {
