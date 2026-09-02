@@ -11,6 +11,8 @@ const storageKeys = {
   favorites: "pokerReviewerFavorites",
   players: "pokerReviewerPlayers"
 };
+const minPlayerAnalysisHands = 3;
+const playerBaselineRecentHands = 3;
 const positionsByPlayers = {
   2: ["BTN/SB", "BB"],
   3: ["BTN", "SB", "BB"],
@@ -43,8 +45,8 @@ const seatLayoutsByPlayers = {
 function createPlayer(playerNumber, seatIndex) {
   return {
     id: `P${playerNumber}`,
-    stack: 200,
-    style: styles[(playerNumber - 1) % styles.length],
+    stack: defaultPlayerStack(),
+    style: "普通",
     hero: playerNumber === 1,
     dealer: playerNumber === 1,
     folded: false,
@@ -59,6 +61,26 @@ function buildSeats(playerCount = 9) {
     seats[seatIndex] = createPlayer(index + 1, seatIndex);
   });
   return seats;
+}
+
+function defaultStackForBlinds(blindsText = "1/2") {
+  const values = String(blindsText).split(/[\\s/]+/).map(value => Number(value)).filter(Number.isFinite);
+  const smallBlind = values[0] || 1;
+  const bigBlind = values[1] || values[0] || 2;
+  const bbCount = smallBlind === 1 && bigBlind === 2 ? 200 : 100;
+  return bigBlind * bbCount;
+}
+
+function defaultPlayerStack() {
+  return defaultStackForBlinds(document.getElementById("blinds")?.value || "1/2");
+}
+
+function applyDefaultStacksBeforeAction() {
+  if (state.actions.some(action => !action.forced || action.manual)) return;
+  const stack = defaultPlayerStack();
+  state.seats.forEach(player => {
+    if (player) player.stack = stack;
+  });
 }
 
 const state = {
@@ -82,6 +104,9 @@ const state = {
   dealTarget: null,
   dealCards: [],
   selectedDealCard: 0,
+  showdownHands: {},
+  showdownEditingSeat: null,
+  selectedShowdownCard: 0,
   board: {
     flop: "",
     turn: "",
@@ -91,11 +116,65 @@ const state = {
   session: null,
   lastReviewText: "",
   lastReviewPayload: null,
+  lastReviewRecordId: "",
   seats: buildSeats(9),
   actions: []
 };
 
 const $ = (id) => document.getElementById(id);
+const scrollLock = {
+  count: 0,
+  y: 0
+};
+
+function lockPageScroll() {
+  if (scrollLock.count === 0) {
+    scrollLock.y = window.scrollY || document.documentElement.scrollTop || 0;
+    document.body.style.position = "fixed";
+    document.body.style.top = `-${scrollLock.y}px`;
+    document.body.style.left = "0";
+    document.body.style.right = "0";
+    document.body.style.width = "100%";
+    document.body.classList.add("dialog-scroll-locked");
+  }
+  scrollLock.count += 1;
+}
+
+function unlockPageScroll() {
+  scrollLock.count = Math.max(0, scrollLock.count - 1);
+  if (scrollLock.count > 0) return;
+  document.body.classList.remove("dialog-scroll-locked");
+  document.body.style.position = "";
+  document.body.style.top = "";
+  document.body.style.left = "";
+  document.body.style.right = "";
+  document.body.style.width = "";
+  window.scrollTo(0, scrollLock.y);
+}
+
+function showDialog(dialog) {
+  if (!dialog || dialog.open) return;
+  lockPageScroll();
+  dialog.dataset.scrollLocked = "true";
+  dialog.showModal();
+}
+
+function closeDialog(dialog) {
+  if (!dialog?.open) return;
+  dialog.close();
+}
+
+function handleDialogClosed(dialog) {
+  if (dialog.dataset.scrollLocked !== "true") return;
+  delete dialog.dataset.scrollLocked;
+  unlockPageScroll();
+}
+
+function scrollHomeToTop() {
+  setActiveTab("analysis");
+  window.scrollTo(0, 0);
+  window.setTimeout(() => window.scrollTo(0, 0), 0);
+}
 
 function readStorage(key, fallback) {
   try {
@@ -110,14 +189,26 @@ function writeStorage(key, value) {
 }
 
 async function apiJson(path, options = {}) {
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {})
-    }
-  });
+  const { timeoutMs = 0, ...fetchOptions } = options;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timer = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+  let response;
+  try {
+    response = await fetch(path, {
+      credentials: "same-origin",
+      ...fetchOptions,
+      signal: controller?.signal || fetchOptions.signal,
+      headers: {
+        "Content-Type": "application/json",
+        ...(fetchOptions.headers || {})
+      }
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("分析请求超时，请稍后重试或检查模型服务状态。");
+    throw error;
+  } finally {
+    if (timer) window.clearTimeout(timer);
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || `请求失败，HTTP ${response.status}`);
   return data;
@@ -169,6 +260,7 @@ async function accountLogin() {
     $("loginPassword").value = "";
     $("loginMessage").textContent = "";
     renderAuthState();
+    scrollHomeToTop();
   } catch (error) {
     $("loginMessage").textContent = friendlyLoginError(error);
   }
@@ -188,6 +280,7 @@ async function adminLogin() {
     state.session = { user: data.user };
     $("loginMessage").textContent = "";
     renderAuthState();
+    scrollHomeToTop();
   } catch (error) {
     $("loginMessage").textContent = friendlyLoginError(error);
   }
@@ -363,6 +456,53 @@ function isSystemPlayerId(id = "") {
   return /^P\d+$/.test(String(id).trim());
 }
 
+function normalizePlayerId(id = "") {
+  return String(id).trim();
+}
+
+function playerRecordKey(id = "") {
+  return normalizePlayerId(id).toLocaleLowerCase("zh-CN");
+}
+
+function mergePlayerRecords(records = {}) {
+  return Object.values(records).reduce((merged, player) => {
+    if (!player?.id) return merged;
+    const key = playerRecordKey(player.id);
+    if (!key) return merged;
+    const previous = merged[key];
+    if (!previous) {
+      merged[key] = {
+        ...player,
+        id: player.id,
+        hands: Array.isArray(player.hands) ? player.hands : [],
+        handCount: playerHandCount(player)
+      };
+      return merged;
+    }
+    const hands = [
+      ...(Array.isArray(player.hands) ? player.hands : []),
+      ...(Array.isArray(previous.hands) ? previous.hands : [])
+    ].reduce((list, hand) => {
+      if (!hand?.favoriteId || list.some(item => item.favoriteId === hand.favoriteId)) return list;
+      list.push(hand);
+      return list;
+    }, []).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    merged[key] = {
+      ...previous,
+      ...player,
+      id: player.id || previous.id,
+      firstSeenAt: [previous.firstSeenAt, player.firstSeenAt].filter(Boolean).sort()[0] || previous.firstSeenAt || player.firstSeenAt,
+      lastSeenAt: [previous.lastSeenAt, player.lastSeenAt].filter(Boolean).sort().pop() || previous.lastSeenAt || player.lastSeenAt,
+      baselineText: player.baselineText || previous.baselineText,
+      analysisText: player.analysisText || previous.analysisText,
+      baselineHandCount: Math.max(Number(previous.baselineHandCount || 0), Number(player.baselineHandCount || 0)),
+      hands,
+      handCount: hands.length
+    };
+    return merged;
+  }, {});
+}
+
 function playerDisplayName(player) {
   if (!player) return "";
   return isSystemPlayerId(player.id) ? `玩家 ${player.id}` : `ID ${player.id}`;
@@ -390,7 +530,13 @@ function boardForStreet(street) {
 }
 
 function amountFor(action) {
-  return ["raise", "call", "blind", "ante", "straddle", "allin"].includes(action.type) ? Number(action.amount || 0) : 0;
+  return ["raise", "call", "blind", "ante", "straddle", "allin", "fold"].includes(action.type) ? Number(action.amount || 0) : 0;
+}
+
+function actionStreetTarget(action) {
+  if (Number.isFinite(Number(action.targetAmount))) return Number(action.targetAmount);
+  if (Number.isFinite(Number(action.callToAmount))) return Number(action.callToAmount);
+  return amountFor(action);
 }
 
 function totalsUntil(step) {
@@ -427,11 +573,18 @@ function actionLabel(action) {
       : previous.type === "call"
         ? `先跟注 ${previous.amount}`
         : `先${map[previous.type] || previous.type} ${previous.amount}`;
-    const target = action.callToAmount || amountFor(action);
+    const target = actionStreetTarget(action);
+    if (action.type === "fold") {
+      return `${position}${action.playerId} ${previousLabel}，后弃牌${target ? `（已投入 ${target}）` : ""}`;
+    }
     const extra = Math.max(0, target - Number(previous.amount || 0));
     return `${position}${action.playerId} ${previousLabel}，后跟注到 ${target}${extra ? `（补 ${extra}）` : ""}`;
   }
-  const amount = amountFor(action);
+  const amount = ["raise", "call"].includes(action.type) ? actionStreetTarget(action) : amountFor(action);
+  if (action.type === "fold") {
+    const committed = actionStreetTarget(action);
+    return `${position}${action.playerId} ${map[action.type]}${committed > amount ? `（已投入 ${committed}）` : amount ? `（已投入 ${amount}）` : ""}`;
+  }
   return `${position}${action.playerId} ${map[action.type]}${amount ? ` ${amount}` : ""}`;
 }
 
@@ -447,11 +600,17 @@ function actionSummary(action, increment = amountFor(action)) {
     blind: action.blind === "SB" ? "小盲" : "大盲"
   };
   if (action.previousAction) {
-    const target = action.callToAmount || amountFor(action);
+    const target = actionStreetTarget(action);
+    if (action.type === "fold") return `弃牌${target ? ` 已投入${target}` : ""}`;
     const extra = Math.max(0, target - Number(action.previousAction.amount || 0));
     return `跟到 ${target}${extra ? ` 补${extra}` : ""}`;
   }
-  return `${map[action.type] || action.type}${increment ? ` ${increment}` : ""}`;
+  if (action.type === "fold") {
+    const committed = actionStreetTarget(action);
+    return `${map[action.type] || action.type}${committed ? ` 已投入${committed}` : ""}`;
+  }
+  const displayAmount = ["raise", "call"].includes(action.type) ? actionStreetTarget(action) : increment;
+  return `${map[action.type] || action.type}${displayAmount ? ` ${displayAmount}` : ""}`;
 }
 
 function actionsWithAmounts(actions = state.actions) {
@@ -463,17 +622,16 @@ function actionsWithAmounts(actions = state.actions) {
     const totalKey = String(action.seatIndex);
     const previousTotalInvested = totalInvested[totalKey] || 0;
     const playerStack = Number(state.seats[action.seatIndex]?.stack || 0);
-    const target = action.callToAmount || amountFor(action);
+    const target = actionStreetTarget(action);
     const previousActionAmount = Number(action.previousAction?.amount || 0);
-    const incrementAmount = action.previousAction
-      ? Math.max(0, target - previousActionAmount)
-      : amountFor(action);
-    const committedAmount = action.previousAction ? target : amountFor(action);
-    const stackBeforeAction = Math.max(0, playerStack - previousTotalInvested - previousActionAmount);
-    const stackAfterAction = Math.max(0, playerStack - previousTotalInvested - committedAmount);
-    const streetTotal = previousStreetTotal + committedAmount;
+    const incrementAmount = amountFor(action);
+    const committedAmount = Math.max(previousStreetTotal + amountFor(action), target);
+    const previousActionExtra = action.previousAction ? Math.max(0, previousActionAmount - previousStreetTotal) : 0;
+    const stackBeforeAction = Math.max(0, playerStack - previousTotalInvested - previousActionExtra);
+    const stackAfterAction = Math.max(0, playerStack - previousTotalInvested - amountFor(action));
+    const streetTotal = previousStreetTotal + amountFor(action);
     streetTotals[streetKey] = streetTotal;
-    totalInvested[totalKey] = previousTotalInvested + committedAmount;
+    totalInvested[totalKey] = previousTotalInvested + amountFor(action);
     return {
       ...action,
       previousAction: action.previousAction || null,
@@ -514,8 +672,14 @@ function resetHandProgress() {
   state.dealTarget = null;
   state.dealCards = [];
   state.selectedDealCard = 0;
+  state.showdownHands = {};
+  state.showdownEditingSeat = null;
+  state.selectedShowdownCard = 0;
   state.board = { flop: "", turn: "", river: "" };
   state.actions = [];
+  state.lastReviewText = "";
+  state.lastReviewPayload = null;
+  state.lastReviewRecordId = "";
 }
 
 function resetHandToStart() {
@@ -542,7 +706,7 @@ function returnToPreviousRound() {
   state.selectedDealCard = 0;
   refreshFoldedStates();
   state.step = state.actions.length - 1;
-  $("returnDialog").close();
+  closeDialog($("returnDialog"));
   render();
 }
 
@@ -550,7 +714,7 @@ function openReturnDialog() {
   const canReturnPrevious = state.streetIndex > 0;
   $("returnPrevRound").disabled = !canReturnPrevious;
   $("returnPrevRound").textContent = canReturnPrevious ? "返回上一圈" : "翻前不能返回上一圈";
-  $("returnDialog").showModal();
+  showDialog($("returnDialog"));
 }
 
 function setPlayerCount(count) {
@@ -558,6 +722,7 @@ function setPlayerCount(count) {
   state.playerCount = nextCount;
   state.seats = buildSeats(nextCount);
   resetHandProgress();
+  applyDefaultStacksBeforeAction();
   syncPlayerCountControl();
   render();
   window.setTimeout(openStartOverlay, 0);
@@ -589,7 +754,7 @@ function setDealer(index) {
 
 function activeSeatIndexes() {
   return state.seats
-    .map((player, index) => player && !player.folded && !player.allin ? index : null)
+    .map((player, index) => player && !player.folded && !seatIsAllIn(index) ? index : null)
     .filter(index => index !== null);
 }
 
@@ -602,6 +767,39 @@ function streetInvestments(street = currentStreet()) {
     totals[action.seatIndex] = (totals[action.seatIndex] || 0) + amountFor(action);
     return totals;
   }, {});
+}
+
+function streetBettingInvestments(street = currentStreet()) {
+  return actionsForStreet(street).reduce((totals, action) => {
+    if (action.type === "ante") return totals;
+    totals[action.seatIndex] = (totals[action.seatIndex] || 0) + amountFor(action);
+    return totals;
+  }, {});
+}
+
+function streetCommittedBySeat(street = currentStreet(), seatIndex = state.selectedSeat, ignoredIndex = -1, beforeIndex = state.actions.length) {
+  return state.actions.reduce((total, action, index) => {
+    if (
+      index >= beforeIndex
+      || index === ignoredIndex
+      || action.street !== street
+      || action.seatIndex !== seatIndex
+    ) return total;
+    return total + amountFor(action);
+  }, 0);
+}
+
+function streetBettingCommittedBySeat(street = currentStreet(), seatIndex = state.selectedSeat, ignoredIndex = -1, beforeIndex = state.actions.length) {
+  return state.actions.reduce((total, action, index) => {
+    if (
+      index >= beforeIndex
+      || index === ignoredIndex
+      || action.street !== street
+      || action.seatIndex !== seatIndex
+      || action.type === "ante"
+    ) return total;
+    return total + amountFor(action);
+  }, 0);
 }
 
 function manualActionIndexesForSeat(street = currentStreet(), seatIndex = state.selectedSeat) {
@@ -629,9 +827,10 @@ function investmentsBeforeAction(street, beforeIndex = state.actions.length, ign
 }
 
 function currentCallAmount(street = currentStreet(), seatIndex = state.selectedSeat, ignoredIndex = -1, beforeIndex = state.actions.length) {
-  const investments = investmentsBeforeAction(street, beforeIndex, ignoredIndex);
-  const target = Math.max(0, ...Object.values(investments));
-  const invested = seatIndex === null || seatIndex === undefined ? 0 : investments[seatIndex] || 0;
+  const target = targetAmountBeforeAction(street, beforeIndex, ignoredIndex);
+  const invested = seatIndex === null || seatIndex === undefined
+    ? 0
+    : streetBettingCommittedBySeat(street, seatIndex, ignoredIndex, beforeIndex);
   return Math.max(0, target - invested);
 }
 
@@ -646,6 +845,18 @@ function remainingStackForSeat(seatIndex, ignoredIndex = -1) {
   return Math.max(0, stack - investedBySeat(seatIndex, ignoredIndex));
 }
 
+function seatHasCommittedStack(seatIndex) {
+  const player = state.seats[seatIndex];
+  if (!player) return false;
+  return investedBySeat(seatIndex) >= Number(player.stack || 0);
+}
+
+function seatIsAllIn(seatIndex) {
+  const player = state.seats[seatIndex];
+  if (!player) return false;
+  return Boolean(player.allin) || seatHasCommittedStack(seatIndex);
+}
+
 function targetAmountForStreet(street = currentStreet(), ignoredIndex = -1) {
   return Math.max(
     0,
@@ -653,76 +864,63 @@ function targetAmountForStreet(street = currentStreet(), ignoredIndex = -1) {
       .filter((action, index) => (
         index !== ignoredIndex
         && action.street === street
-        && !["ante", "check", "fold"].includes(action.type)
+        && !["ante", "check", "call", "fold"].includes(action.type)
       ))
-      .map(amountFor)
+      .map(actionStreetTarget)
+  );
+}
+
+function targetAmountBeforeAction(street, beforeIndex, ignoredIndex = -1) {
+  return Math.max(
+    0,
+    ...state.actions
+      .filter((action, index) => (
+        index < beforeIndex
+        && index !== ignoredIndex
+        && action.street === street
+        && !["ante", "check", "call", "fold"].includes(action.type)
+      ))
+      .map(actionStreetTarget)
   );
 }
 
 function callAmountForSeat(street = currentStreet(), seatIndex = state.selectedSeat) {
   const existingIndex = manualActionIndexesForSeat(street, seatIndex)[0] ?? -1;
-  if (existingIndex >= 0) {
-    return targetAmountForStreet(street, existingIndex);
-  }
-  return currentCallAmount(street, seatIndex);
+  const beforeIndex = existingIndex >= 0 ? existingIndex : state.actions.length;
+  const target = targetAmountForStreet(street, existingIndex);
+  const invested = seatIndex === null || seatIndex === undefined
+    ? 0
+    : streetBettingCommittedBySeat(street, seatIndex, existingIndex, beforeIndex);
+  return Math.max(0, target - invested);
 }
 
 function legalActionsForSeat(street = currentStreet(), seatIndex = state.selectedSeat) {
+  if (seatIndex === null || seatIndex === undefined || seatIsAllIn(seatIndex)) return new Set();
   const existingIndex = manualActionIndexesForSeat(street, seatIndex)[0] ?? -1;
   const callAmount = callAmountForSeat(street, seatIndex);
   const remaining = seatIndex === null || seatIndex === undefined ? 0 : remainingStackForSeat(seatIndex, existingIndex);
   const canStraddle = street === "Preflop" && $("unlimitedStraddle").checked;
+  const straddle = straddleAmount();
   return new Set([
     ...(callAmount <= 0 ? ["check"] : []),
     "fold",
-    ...(callAmount > 0 ? ["call"] : []),
-    ...(remaining > 0 ? ["raise", "allin"] : []),
-    ...(canStraddle && remaining > 0 ? ["straddle"] : [])
+    ...(callAmount > 0 && remaining >= callAmount ? ["call"] : []),
+    ...(remaining > callAmount ? ["raise"] : []),
+    ...(remaining > 0 ? ["allin"] : []),
+    ...(canStraddle && remaining >= straddle ? ["straddle"] : [])
   ]);
 }
 
 function normalizeStreetCallAmounts(street = currentStreet()) {
-  const streetEntries = state.actions
-    .map((action, index) => ({ action, index }))
-    .filter(({ action }) => action.street === street);
-  const finalTarget = Math.max(
-    0,
-    ...streetEntries
-      .filter(({ action }) => !["ante", "check", "fold"].includes(action.type))
-      .map(({ action }) => amountFor(action))
-  );
-  const finalAggressor = [...streetEntries]
-    .reverse()
-    .find(({ action }) => ["raise", "straddle", "blind", "allin"].includes(action.type) && amountFor(action) === finalTarget);
-
-  streetEntries.forEach(({ action, index }) => {
-    if (action.forced && !action.manual) return;
-    if (["check", "fold", "allin"].includes(action.type)) return;
-    if (amountFor(action) >= finalTarget) return;
-    const previousAmount = action.callToAmount || amountFor(action);
-    if (previousAmount > 0 && !action.previousAction) {
-      action.previousAction = {
-        type: action.type,
-        amount: previousAmount
-      };
-    }
-    if (action.type === "raise" && index !== finalAggressor?.index) {
-      action.type = "call";
-      action.forced = false;
-      action.manual = false;
-    }
-    if (["call", "raise", "straddle"].includes(action.type)) {
-      action.amount = finalTarget;
-      action.callToAmount = finalTarget;
-    }
-  });
+  return street;
 }
 
 function refreshFoldedStates() {
   state.seats.forEach((player, index) => {
     if (!player) return;
     player.folded = state.actions.some(action => action.seatIndex === index && action.type === "fold");
-    player.allin = state.actions.some(action => action.seatIndex === index && action.type === "allin");
+    player.allin = state.actions.some(action => action.seatIndex === index && action.type === "allin")
+      || seatHasCommittedStack(index);
   });
 }
 
@@ -734,12 +932,35 @@ function liveSeatIndexes() {
 
 function allLivePlayersAllIn() {
   const live = liveSeatIndexes();
-  return live.length > 1 && live.every(index => state.seats[index]?.allin);
+  return live.length > 1 && live.every(index => seatIsAllIn(index));
+}
+
+function handEndedByFolds() {
+  const live = liveSeatIndexes();
+  return live.length <= 1;
+}
+
+function allInRunoutReady() {
+  const live = liveSeatIndexes();
+  if (live.length <= 1) return false;
+  const active = live.filter(index => !seatIsAllIn(index));
+  if (!active.length) return true;
+  if (active.length > 1) return false;
+  const target = targetAmountForStreet(currentStreet());
+  if (target <= 0) return false;
+  const investments = streetBettingInvestments(currentStreet());
+  return (investments[active[0]] || 0) >= target;
 }
 
 function playersMissingAction(street = currentStreet()) {
+  if (handEndedByFolds() || allInRunoutReady()) return [];
   const acted = new Set(actionsForStreet(street).filter(action => !action.forced).map(action => action.seatIndex));
-  return activeSeatIndexes().filter(index => !acted.has(index));
+  const investments = streetBettingInvestments(street);
+  const target = targetAmountForStreet(street);
+  return activeSeatIndexes().filter(index => {
+    if (target > 0 && (investments[index] || 0) < target) return true;
+    return !acted.has(index);
+  });
 }
 
 function parseBlindAmounts() {
@@ -847,6 +1068,58 @@ function syncForcedBlinds() {
 
 function cardCode(card) {
   return card.rank && card.suit ? `${card.rank}${card.suit}` : "";
+}
+
+function normalizeCardCode(raw = "") {
+  const value = String(raw).trim();
+  if (!value) return "";
+  return `${value.slice(0, -1).toUpperCase()}${value.slice(-1).toLowerCase()}`;
+}
+
+function cardDisplay(raw = "") {
+  const normalized = normalizeCardCode(raw);
+  const parsed = normalized ? parseCards(normalized)[0] : null;
+  return parsed?.label || normalized || "未知牌";
+}
+
+function selectedBoardCards(excludeStreet = "") {
+  return [
+    ...(excludeStreet === "Flop" ? [] : state.board.flop.trim().split(/\s+/).filter(Boolean)),
+    ...(excludeStreet === "Turn" ? [] : state.board.turn.trim().split(/\s+/).filter(Boolean)),
+    ...(excludeStreet === "River" ? [] : state.board.river.trim().split(/\s+/).filter(Boolean))
+  ];
+}
+
+function duplicateCardMessage(cards) {
+  const seen = new Set();
+  const duplicate = cards
+    .map(normalizeCardCode)
+    .filter(Boolean)
+    .find(card => {
+      if (seen.has(card)) return true;
+      seen.add(card);
+      return false;
+    });
+  return duplicate ? `${cardDisplay(duplicate)} 已经被选择，不能重复发同一张牌。` : "";
+}
+
+function selectedDeckCards({ includeHero = true, excludeStreet = "", dealCards = [] } = {}) {
+  return [
+    ...(includeHero ? $("heroCards").value.trim().split(/\s+/).filter(Boolean) : []),
+    ...selectedBoardCards(excludeStreet),
+    ...knownShowdownCards(),
+    ...dealCards.map(cardCode).filter(Boolean)
+  ];
+}
+
+function knownShowdownCards(excludeSeat = null) {
+  return Object.entries(state.showdownHands || {}).flatMap(([seatIndex, hand]) => (
+    Number(seatIndex) === excludeSeat || !hand?.known ? [] : hand.cards.map(cardCode).filter(Boolean)
+  ));
+}
+
+function currentDeckError() {
+  return duplicateCardMessage(selectedDeckCards());
 }
 
 function cardFromCode(raw = "") {
@@ -971,6 +1244,11 @@ function confirmStartCards() {
     $("startOverlayTitle").textContent = "请先选完整手牌";
     return;
   }
+  const duplicateMessage = duplicateCardMessage(state.startConfig.cards.map(cardCode));
+  if (duplicateMessage) {
+    $("startOverlayTitle").textContent = duplicateMessage;
+    return;
+  }
   $("heroCards").value = state.startConfig.cards.map(cardCode).join(" ");
   setDealer(state.startConfig.dealerSeat);
   setHero(state.startConfig.heroSeat);
@@ -979,6 +1257,13 @@ function confirmStartCards() {
 }
 
 function advanceStartCardSelection() {
+  const duplicateMessage = duplicateCardMessage(state.startConfig.cards.map(cardCode));
+  if (duplicateMessage) {
+    $("startOverlayTitle").textContent = duplicateMessage;
+    renderStartOverlay();
+    $("startOverlayTitle").textContent = duplicateMessage;
+    return;
+  }
   const cards = state.startConfig.cards;
   if (cards.every(card => card.rank && card.suit)) {
     confirmStartCards();
@@ -988,6 +1273,141 @@ function advanceStartCardSelection() {
     state.startConfig.selectedCard = 1;
   }
   renderStartOverlay();
+}
+
+function warnDuplicateDealCard() {
+  const duplicateMessage = duplicateCardMessage(selectedDeckCards({
+    excludeStreet: state.dealTarget,
+    dealCards: state.dealCards
+  }));
+  if (!duplicateMessage) return false;
+  $("dealTitle").textContent = duplicateMessage;
+  return true;
+}
+
+function liveShowdownSeatIndexes() {
+  return liveSeatIndexes().filter(index => !state.seats[index]?.hero);
+}
+
+function ensureShowdownHand(seatIndex) {
+  const current = state.showdownHands[seatIndex];
+  if (current) return current;
+  state.showdownHands[seatIndex] = {
+    known: false,
+    cards: [
+      { rank: "", suit: "" },
+      { rank: "", suit: "" }
+    ]
+  };
+  return state.showdownHands[seatIndex];
+}
+
+function showdownCardsForSeat(seatIndex) {
+  return ensureShowdownHand(seatIndex).cards;
+}
+
+function selectedShowdownDeckCards(seatIndex) {
+  return [
+    $("heroCards").value.trim().split(/\s+/).filter(Boolean),
+    selectedBoardCards(),
+    knownShowdownCards(seatIndex),
+    showdownCardsForSeat(seatIndex).map(cardCode).filter(Boolean)
+  ].flat();
+}
+
+function showdownHandText(hand) {
+  if (!hand?.known) return "未知底牌";
+  const cards = hand.cards.map(cardCode).filter(Boolean);
+  return cards.length === 2 ? cards.map(cardDisplay).join(" ") : "待选择两张牌";
+}
+
+function renderShowdownCards() {
+  const seatIndex = state.showdownEditingSeat;
+  const hand = seatIndex === null ? null : ensureShowdownHand(seatIndex);
+  const cards = hand?.cards || [];
+  $("showdownCards").innerHTML = cards.map((card, index) => {
+    const parsed = cardCode(card) ? parseCards(cardCode(card))[0] : null;
+    return `
+      <button type="button" class="deal-card ${index === state.selectedShowdownCard ? "selected" : ""}" data-showdown-card="${index}">
+        ${parsed ? cardHtml(parsed) : `<span>第 ${index + 1} 张</span>`}
+      </button>
+    `;
+  }).join("");
+
+  $("showdownRankPicker").innerHTML = ranks.map(rank => `
+    <button type="button" data-showdown-rank="${rank}" class="${cards[state.selectedShowdownCard]?.rank === rank ? "selected" : ""}">${rank}</button>
+  `).join("");
+
+  $("showdownSuitPicker").innerHTML = suits.map(suit => `
+    <button type="button" data-showdown-suit="${suit.code}" class="${cards[state.selectedShowdownCard]?.suit === suit.code ? "selected" : ""}">${suit.label}<span>${suit.name}</span></button>
+  `).join("");
+}
+
+function warnDuplicateShowdownCard() {
+  const seatIndex = state.showdownEditingSeat;
+  const duplicateMessage = duplicateCardMessage(selectedShowdownDeckCards(seatIndex));
+  if (!duplicateMessage) return false;
+  $("showdownTitle").textContent = duplicateMessage;
+  return true;
+}
+
+function renderShowdownDialog() {
+  const positions = positionsForSeats();
+  const seats = liveShowdownSeatIndexes();
+  $("showdownPlayers").innerHTML = seats.length ? seats.map(index => {
+    const player = state.seats[index];
+    const hand = ensureShowdownHand(index);
+    return `
+      <article class="showdown-player ${state.showdownEditingSeat === index ? "active" : ""}">
+        <div>
+          <strong>${escapeHtml(positions[index] || "")} ${escapeHtml(playerDisplayName(player))}</strong>
+          <span>${escapeHtml(showdownHandText(hand))}</span>
+        </div>
+        <div class="showdown-actions">
+          <button type="button" data-showdown-unknown="${index}">未知</button>
+          <button type="button" data-showdown-edit="${index}">输入底牌</button>
+        </div>
+      </article>
+    `;
+  }).join("") : `<div class="empty-state">没有需要补充底牌的其他未弃牌玩家。</div>`;
+  $("showdownPicker").hidden = state.showdownEditingSeat === null;
+  if (state.showdownEditingSeat !== null) renderShowdownCards();
+}
+
+function openShowdownDialog() {
+  state.showdownEditingSeat = liveShowdownSeatIndexes()[0] ?? null;
+  state.selectedShowdownCard = 0;
+  $("showdownTitle").textContent = "输入其他玩家底牌";
+  renderShowdownDialog();
+  showDialog($("showdownDialog"));
+}
+
+function showdownPayload() {
+  const positions = positionsForSeats();
+  return liveSeatIndexes().map(index => {
+    const player = state.seats[index];
+    const hand = state.showdownHands[index];
+    return {
+      seat: index + 1,
+      position: positions[index],
+      playerId: player?.id || "",
+      hero: Boolean(player?.hero),
+      known: Boolean(player?.hero || hand?.known),
+      cards: player?.hero
+        ? $("heroCards").value.trim()
+        : hand?.known
+          ? hand.cards.map(cardCode).join(" ")
+          : "未知"
+    };
+  });
+}
+
+function showdownInputError() {
+  const incomplete = Object.entries(state.showdownHands || {}).find(([, hand]) => (
+    hand?.known && hand.cards.some(card => !card.rank || !card.suit)
+  ));
+  if (incomplete) return "已选择输入底牌的玩家，需要选满两张牌；不知道就点未知。";
+  return duplicateCardMessage(selectedDeckCards());
 }
 
 function seatStreetAction(index) {
@@ -1016,8 +1436,13 @@ function renderSeats() {
     }
 
     const left = Math.max(0, Number(player.stack) - (totals[index] || 0));
+    const knownOpponentCards = state.showdownHands[index]?.known
+      ? state.showdownHands[index].cards.map(cardCode).join(" ")
+      : "";
     const cards = player.hero
       ? parseCards($("heroCards").value).map(cardHtml).join("")
+      : knownOpponentCards
+        ? parseCards(knownOpponentCards).map(cardHtml).join("")
       : `<div class="card back">?</div><div class="card back">?</div>`;
     const streetAction = seatStreetAction(index);
     const actionBadge = streetAction ? `
@@ -1089,17 +1514,19 @@ function openSeatDialog(index) {
     $("playerStyle").value = player.style;
     $("playerId").value = player.id;
     $("playerDealer").checked = Boolean(player.dealer);
+    const existingIndex = manualActionIndexesForSeat(currentStreet(), index)[0] ?? -1;
+    const currentTarget = targetAmountForStreet(currentStreet(), existingIndex);
     $("actionAmount").value = existingAction?.type === "raise"
-      ? existingAction.amount
-      : callAmountForSeat(currentStreet(), index) || 6;
+      ? actionStreetTarget(existingAction)
+      : Math.max(currentTarget > 0 ? currentTarget + 1 : 1, 6);
     updateActionAmountVisibility();
   } else {
     $("newPlayerId").value = `P${index + 1}`;
-    $("newPlayerStack").value = 200;
+    $("newPlayerStack").value = defaultPlayerStack();
     $("newPlayerStyle").value = "普通";
   }
 
-  $("seatDialog").showModal();
+  showDialog($("seatDialog"));
 }
 
 function updateActionAmountVisibility() {
@@ -1109,7 +1536,9 @@ function updateActionAmountVisibility() {
   const legalActions = legalActionsForSeat(currentStreet(), state.selectedSeat);
   const canStraddle = currentStreet() === "Preflop" && $("unlimitedStraddle").checked;
   if (!canStraddle && state.selectedAction === "straddle") state.selectedAction = "raise";
-  if (!legalActions.has(state.selectedAction)) {
+  if (!legalActions.size) {
+    state.selectedAction = "";
+  } else if (!legalActions.has(state.selectedAction)) {
     state.selectedAction = legalActions.has("call")
       ? "call"
       : legalActions.has("check")
@@ -1123,7 +1552,10 @@ function updateActionAmountVisibility() {
   $("allinHint").textContent = `投入 ${allinAmount}`;
   $("straddleAction").hidden = !canStraddle;
   $("straddleHint").textContent = `记录 ${straddleAmount()}`;
-  $("recordAction").textContent = state.selectedAction === "call"
+  $("recordAction").disabled = !legalActions.size;
+  $("recordAction").textContent = !legalActions.size
+    ? "玩家已 All-in"
+    : state.selectedAction === "call"
     ? `记录跟注 ${callAmount}`
     : state.selectedAction === "allin"
       ? `记录 All-in ${allinAmount}`
@@ -1136,6 +1568,23 @@ function updateActionAmountVisibility() {
     button.setAttribute("aria-disabled", String(!legal));
     button.classList.toggle("selected", button.dataset.action === state.selectedAction);
   });
+}
+
+function potBeforeSelectedAction() {
+  const existingIndex = manualActionIndexesForSeat(currentStreet(), state.selectedSeat)[0] ?? -1;
+  return totalsUntil(existingIndex >= 0 ? existingIndex - 1 : state.actions.length - 1).pot;
+}
+
+function applyPotShortcut(ratio) {
+  if (state.selectedAction !== "raise") {
+    state.selectedAction = "raise";
+    updateActionAmountVisibility();
+  }
+  const pot = potBeforeSelectedAction();
+  const existingIndex = manualActionIndexesForSeat(currentStreet(), state.selectedSeat)[0] ?? -1;
+  const currentTarget = targetAmountForStreet(currentStreet(), existingIndex);
+  const amount = Math.max(currentTarget > 0 ? currentTarget + 1 : 1, Math.round(pot * ratio));
+  $("actionAmount").value = amount;
 }
 
 function addAction(type) {
@@ -1153,15 +1602,59 @@ function addAction(type) {
   const existingIndex = existingIndexes[0] ?? -1;
   const existingAction = existingIndex >= 0 ? state.actions[existingIndex] : null;
   const actionIndex = existingIndex >= 0 ? existingIndex : state.actions.length;
-  const previousAction = type === "call" && existingAction && !["call", "check", "fold"].includes(existingAction.type)
+  const committedBeforeAction = streetBettingCommittedBySeat(street, index, existingIndex, actionIndex);
+  const previousCommitted = existingAction ? committedBeforeAction + amountFor(existingAction) : committedBeforeAction;
+  const previousAction = type === "fold" && existingAction
     ? {
         type: existingAction.previousAction?.type || existingAction.type,
-        amount: existingAction.previousAction?.amount || amountFor(existingAction)
+        amount: existingAction.previousAction?.amount || previousCommitted
       }
+    : type === "call" && existingAction && !["call", "check", "fold"].includes(existingAction.type)
+    ? {
+        type: existingAction.previousAction?.type || existingAction.type,
+        amount: existingAction.previousAction?.amount || previousCommitted
+      }
+    : type === "call" && existingAction?.type === "call" && callAmountForSeat(street, index) > actionStreetTarget(existingAction)
+      ? {
+          type: "call",
+          amount: existingAction.callToAmount || actionStreetTarget(existingAction)
+        }
     : type === "call" && existingAction?.previousAction
       ? existingAction.previousAction
       : null;
-  const callTarget = type === "call" ? callAmountForSeat(street, index) : 0;
+  const callTarget = type === "call"
+    ? targetAmountForStreet(street, existingIndex)
+    : 0;
+  const currentTarget = targetAmountForStreet(street, existingIndex);
+  const raiseTarget = type === "raise" ? Math.max(0, Number($("actionAmount").value || 0)) : 0;
+  if (type === "raise" && raiseTarget <= currentTarget) {
+    $("currentAction").textContent = currentTarget > 0
+      ? `加注金额必须大于当前需要跟到的 ${currentTarget}`
+      : "下注金额必须大于 0";
+    return;
+  }
+  if (type === "raise" && raiseTarget > committedBeforeAction + remainingStackForSeat(index, existingIndex)) {
+    $("currentAction").textContent = "加注金额超过剩余筹码，请选择 All-in";
+    return;
+  }
+  const actionAmount = type === "raise"
+    ? Math.max(0, raiseTarget - committedBeforeAction)
+    : type === "call"
+      ? Math.max(0, callTarget - committedBeforeAction)
+      : type === "allin"
+        ? remainingStackForSeat(index, existingIndex)
+      : type === "straddle"
+        ? straddleAmount()
+        : type === "fold" && existingAction
+          ? amountFor(existingAction)
+          : 0;
+  const targetAmount = type === "raise"
+    ? raiseTarget
+    : type === "call"
+      ? callTarget
+      : type === "allin" || type === "straddle" || type === "fold"
+        ? committedBeforeAction + actionAmount
+        : committedBeforeAction;
   const action = {
     street: currentStreet(),
     seatIndex: index,
@@ -1170,15 +1663,8 @@ function addAction(type) {
     type,
     forced: type === "straddle",
     manual: type === "straddle",
-    amount: type === "raise"
-      ? Number($("actionAmount").value || 0)
-      : type === "call"
-        ? callTarget
-        : type === "allin"
-          ? remainingStackForSeat(index, existingIndex)
-        : type === "straddle"
-          ? straddleAmount()
-          : 0
+    amount: actionAmount,
+    targetAmount
   };
   if (previousAction) {
     action.previousAction = previousAction;
@@ -1195,8 +1681,13 @@ function addAction(type) {
   }
   normalizeStreetCallAmounts(street);
   refreshFoldedStates();
-  $("seatDialog").close();
-  if (allLivePlayersAllIn() && street !== "River") {
+  closeDialog($("seatDialog"));
+  if (handEndedByFolds()) {
+    render();
+    $("currentAction").textContent = "只剩一名未弃牌玩家，本手牌行动已结束，可以进行牌谱分析";
+    return;
+  }
+  if (allInRunoutReady() && street !== "River") {
     render();
     openDealDialog();
     return;
@@ -1245,7 +1736,7 @@ function openDealDialog() {
   $("dealStreetLabel").textContent = `${currentStreet()} 完成`;
   $("dealTitle").textContent = target === "Flop" ? "发翻牌" : target === "Turn" ? "发转牌" : "发河牌";
   renderDealCards();
-  $("dealDialog").showModal();
+  showDialog($("dealDialog"));
 }
 
 function confirmDeal() {
@@ -1255,14 +1746,30 @@ function confirmDeal() {
     $("dealTitle").textContent = "请先选完整牌面";
     return;
   }
+  const duplicateMessage = duplicateCardMessage(selectedDeckCards({
+    excludeStreet: state.dealTarget,
+    dealCards: state.dealCards
+  }));
+  if (duplicateMessage) {
+    $("dealTitle").textContent = duplicateMessage;
+    return;
+  }
   const cards = state.dealCards.map(cardCode).join(" ");
   if (state.dealTarget === "Flop") state.board.flop = cards;
   if (state.dealTarget === "Turn") state.board.turn = cards;
   if (state.dealTarget === "River") state.board.river = cards;
   state.streetIndex = streets.indexOf(state.dealTarget);
   state.step = state.actions.length - 1;
-  $("dealDialog").close();
+  closeDialog($("dealDialog"));
   render();
+  if (allInRunoutReady()) {
+    if (currentStreet() === "River") {
+      $("currentAction").textContent = "河牌已发完，可以进行牌谱分析";
+      openReviewConfirm("河牌已发完，本手牌可以开始牌谱分析。");
+    } else {
+      window.setTimeout(openDealDialog, 0);
+    }
+  }
 }
 
 function boardSummary() {
@@ -1273,21 +1780,53 @@ function boardSummary() {
   };
 }
 
+function missingActionSummary(street = currentStreet()) {
+  const positions = positionsForSeats();
+  const investments = streetBettingInvestments(street);
+  const target = targetAmountForStreet(street);
+  return playersMissingAction(street).map(index => ({
+    seat: index + 1,
+    position: positions[index],
+    playerId: state.seats[index]?.id || "",
+    reason: target > 0 && (investments[index] || 0) < target
+      ? `该玩家当前街已投入 ${investments[index] || 0}，需要对 ${target} 的目标金额重新决策`
+      : "该玩家在当前街还没有主动行动记录"
+  }));
+}
+
 function handPayload() {
   const positions = positionsForSeats();
   const { pot, totals } = totalsUntil(state.actions.length - 1);
   const enrichedActions = actionsWithAmounts();
+  const anteAmount = Number($("anteAmount").value || 0);
+  const showdownHands = showdownPayload();
   return {
+    gameProfile: {
+      environment: "线下娱乐局",
+      analysisPriority: "实战盈利与玩家倾向优先，GTO 仅作补充参考",
+      handStrengthRule: "分析前必须精确比较五张最佳牌；例如 Hero AK 在 A-K-8-4-5 上是 AAKK8，压制 A8 的 AA88K，A8 不是能赢 Hero AK 的组合",
+      normalPreflopOpenRangeBB: "3-20BB",
+      openSizeRule: "3BB 到 20BB 的翻前 open 在本局型中都属于正常尺度，不能仅因数值大于常规线上尺度而判定异常",
+      anteRule: "Ante 不是固定 1，而是由用户按当前级别填写的实际筹码额；例如 2/4、3/6、5/5 级别下 ante 数额可能不同",
+      configuredAnteAmount: anteAmount,
+      anteIsCommon: true,
+      straddleMode: "无限鱿鱼 / 血战鱿鱼",
+      straddleIsCommon: true,
+      sizingBaseline: "以本局 ante、鱿鱼、有效筹码、SPR、玩家倾向和现场尺度为基准，不以常规线上 2-3BB open 作为主要评判基准"
+    },
     playerCount: occupiedPlayerCount(),
     blinds: $("blinds").value,
-    ante: Number($("anteAmount").value || 0),
+    ante: anteAmount,
     straddle: {
       finiteAmount: Number($("straddleAmount").value || 0),
       unlimited: $("unlimitedStraddle").checked
     },
     currentStreet: currentStreet(),
+    missingActionsOnCurrentStreet: missingActionSummary(currentStreet()),
     pot,
     heroCards: $("heroCards").value.trim(),
+    hasKnownOpponentCards: showdownHands.some(hand => !hand.hero && hand.known),
+    showdownHands,
     board: boardSummary(),
     players: state.seats.map((player, index) => player ? {
       seat: index + 1,
@@ -1313,8 +1852,11 @@ function handPayload() {
           type: action.type,
           label: actionLabel(action),
           summary: action.summary,
+          isPlayerDecision: !action.forced || Boolean(action.manual),
+          actionKind: action.forced && !action.manual ? "forced_post" : "player_decision",
+          forcedMeaning: action.forced && !action.manual ? "强制投入，例如 ante / SB / BB；这不是玩家主动决策" : "",
           amount: amountFor(action),
-          targetAmount: action.callToAmount || amountFor(action),
+          targetAmount: actionStreetTarget(action),
           incrementAmount: action.incrementAmount,
           stackBeforeAction: action.stackBeforeAction,
           stackAfterAction: action.stackAfterAction,
@@ -1330,21 +1872,23 @@ function handPayload() {
 
 function reviewPrompt(payload) {
   return [
-    "你是一名德州扑克 GTO 复盘教练，熟悉 9 人桌现金局和玩家倾向建模。",
-    "请用中文分析这手牌。不要泛泛而谈，必须结合行动线、位置、筹码、玩家风格、底池和公共牌。",
-    "请按以下结构输出：",
-    "1. 手牌摘要：一句话总结局面。",
-    "2. Preflop / Flop / Turn / River：每条街分别分析行动线是否合理、关键玩家范围、Hero 范围、对手价值范围、诈唬范围、可用尺度。",
-    "3. 对手范围：按玩家位置列出主要组合类别，不需要穷举全部组合，但要具体到牌型或典型手牌。",
-    "4. GTO 建议：给出推荐动作、下注尺度、继续/弃牌阈值。",
-    "5. Exploit 建议：结合玩家风格给出偏离 GTO 的实战调整。",
-    "6. 最大错误与下一次复盘重点。",
-    "如果信息不足，请明确指出缺失信息，并基于已有信息给出条件化判断。",
-    "注意行动数据中的 previousAction / incrementAmount / targetAmount：如果一名玩家先 open 或跟注，后面面对 3B/再加注自动补跟，请理解为该玩家先前已有投入，之后补到 targetAmount，不要误判为该玩家与后位玩家同时加注到同一金额。",
-    "每条行动还包含 stackBeforeAction / stackAfterAction / behindBeforeAction / behindAfterAction，请用行动当下的后手筹码评估下注尺度、SPR、是否承诺底池以及 all-in 压力。",
+    "你是线下德州扑克娱乐局复盘教练。请用中文输出短报告，控制在 900-1300 字，不要长篇铺垫。",
+    "分析基准：线下娱乐局，常见 ante 和无限鱿鱼；ante 使用 payload 里的实际数额，不是固定 1BB；翻前 open 3-20BB 属于常规现场尺度，不要反复解释，也不要套用线上 2-3BB 标准。",
+    "必须结合行动线、位置、有效筹码、底池、玩家风格和公共牌。GTO 只做一句补充，不要展开理论课。",
+    "牌力判断要先精确比较五张最佳牌，避免把被 Hero 压制的弱两对误列为赢牌组合。",
+    "showdownHands 里 known=true 才代表已知底牌；cards=未知 时不要假设具体牌，只能按范围分析。",
+    "如果 hasKnownOpponentCards=true，必须分两层分析：先完全假装不知道对手底牌，只按行动线和范围做实战决策分析；再用已知底牌复盘对手真实思路、打法倾向和暴露的问题。不要用已知底牌倒推第一部分结论。",
+    "actionKind=forced_post 是强制投入，不是主动行动；只有 missingActionsOnCurrentStreet 里的玩家才算漏行动。",
+    "amount 是本次实际投入，targetAmount 是跟到/加注到的目标，previousAction 表示该玩家本街之前已有动作。",
+    "输出格式固定为 5 段：",
+    "1. 摘要：1-2 句。",
+    "2. 未知底牌视角：Preflop/Flop/Turn/River 每街最多 2 句，只按行动线、范围和赔率分析。",
+    "3. 已知底牌复盘：如果有已知对手底牌，说明这些底牌如何解释对手思路、打法倾向和错误；如果没有已知对手底牌，则写“无已知对手底牌”。",
+    "4. 实战建议：给出下一次更赚钱的动作、下注尺度和 exploit 调整。",
+    "5. 最大错误：只列 1-2 个最重要问题。",
     "",
     "牌局数据 JSON：",
-    JSON.stringify(payload, null, 2)
+    JSON.stringify(payload)
   ].join("\n");
 }
 
@@ -1364,6 +1908,7 @@ function renderPayloadSummary(payload) {
     <div class="readonly-block">
       <h3>手牌信息</h3>
       <p>${escapeHtml(payload.playerCount)} 人桌 · ${escapeHtml(payload.blinds)} · 底池 ${escapeHtml(payload.pot)}</p>
+      <p>局型：${escapeHtml(payload.gameProfile?.environment || "线下娱乐局")} · Ante ${escapeHtml(payload.ante ?? 0)} · ${payload.straddle?.unlimited ? "无限鱿鱼" : "有限鱿鱼"} · 常规 open ${escapeHtml(payload.gameProfile?.normalPreflopOpenRangeBB || "3-20BB")}</p>
       <p>Hero：${escapeHtml(payload.heroCards || "未填")} · 公共牌：${escapeHtml(board)}</p>
     </div>
     <div class="readonly-block">
@@ -1384,7 +1929,12 @@ function favoriteRecords() {
 }
 
 function playerRecords() {
-  return readStorage(storageKeys.players, {});
+  const records = readStorage(storageKeys.players, {});
+  const merged = mergePlayerRecords(records);
+  if (Object.keys(merged).length !== Object.keys(records || {}).length) {
+    writeStorage(storageKeys.players, merged);
+  }
+  return merged;
 }
 
 function playerHandCount(player) {
@@ -1398,12 +1948,41 @@ function playerHandActions(payload, playerId) {
     .map(action => `${street} · ${action.label}`));
 }
 
+function playerHandSnapshot(payload, playerId) {
+  const player = payload.players.find(item => item.id === playerId) || {};
+  return {
+    title: handTitle(payload),
+    game: {
+      playerCount: payload.playerCount,
+      blinds: payload.blinds,
+      ante: payload.ante,
+      straddle: payload.straddle,
+      pot: payload.pot,
+      heroCards: payload.heroCards,
+      board: payload.board
+    },
+    player: {
+      id: player.id,
+      position: player.position,
+      style: player.style,
+      stack: player.stack,
+      invested: player.invested,
+      remaining: player.remaining,
+      folded: player.folded,
+      hero: player.hero
+    },
+    playerActions: playerHandActions(payload, playerId),
+    fullActionLine: actionLines(payload)
+  };
+}
+
 function savePlayerRecord(player) {
   if (!player?.id || isSystemPlayerId(player.id)) return;
   const records = playerRecords();
-  const id = player.id.trim();
-  const previous = records[id] || { id, handCount: 0, hands: [], firstSeenAt: new Date().toISOString() };
-  records[id] = {
+  const id = normalizePlayerId(player.id);
+  const key = playerRecordKey(id);
+  const previous = records[key] || { id, handCount: 0, hands: [], firstSeenAt: new Date().toISOString() };
+  records[key] = {
     ...previous,
     id,
     style: player.style,
@@ -1416,15 +1995,33 @@ function savePlayerRecord(player) {
   renderPlayerInfoList();
 }
 
-function savePlayersFromPayload(payload, favoriteRecord) {
+function reviewHandRecord(payload, reviewText, overrides = {}) {
+  const id = overrides.id || state.lastReviewRecordId || `hand-${Date.now()}`;
+  state.lastReviewRecordId = id;
+  return {
+    id,
+    createdAt: overrides.createdAt || new Date().toISOString(),
+    title: handTitle(payload),
+    payload,
+    reviewText,
+    favorite: Boolean(overrides.favorite)
+  };
+}
+
+function savePlayersFromPayload(payload, handRecord) {
   const records = playerRecords();
   payload.players.filter(player => !player.empty && player.id && !isSystemPlayerId(player.id)).forEach(player => {
-    const previous = records[player.id] || { id: player.id, handCount: 0, hands: [], firstSeenAt: new Date().toISOString() };
-    const hands = Array.isArray(previous.hands) ? previous.hands.filter(hand => hand.favoriteId !== favoriteRecord.id) : [];
+    const id = normalizePlayerId(player.id);
+    const key = playerRecordKey(id);
+    const previous = records[key] || { id, handCount: 0, hands: [], firstSeenAt: new Date().toISOString() };
+    const hands = Array.isArray(previous.hands)
+      ? previous.hands.filter(hand => (hand.recordId || hand.favoriteId) !== handRecord.id)
+      : [];
     hands.unshift({
-      favoriteId: favoriteRecord.id,
-      title: favoriteRecord.title,
-      createdAt: favoriteRecord.createdAt,
+      recordId: handRecord.id,
+      favoriteId: handRecord.favorite ? handRecord.id : "",
+      title: handRecord.title,
+      createdAt: handRecord.createdAt,
       position: player.position,
       style: player.style,
       stack: player.stack,
@@ -1432,11 +2029,12 @@ function savePlayersFromPayload(payload, favoriteRecord) {
       remaining: player.remaining,
       folded: player.folded,
       actions: playerHandActions(payload, player.id),
-      reviewText: favoriteRecord.reviewText
+      handSummary: playerHandSnapshot(payload, player.id),
+      reviewText: handRecord.reviewText
     });
-    records[player.id] = {
+    records[key] = {
       ...previous,
-      id: player.id,
+      id,
       style: player.style,
       stack: player.stack,
       position: player.position,
@@ -1452,14 +2050,8 @@ function savePlayersFromPayload(payload, favoriteRecord) {
 function saveFavoriteHand() {
   if (!state.lastReviewText || !state.lastReviewPayload) return;
   const records = favoriteRecords();
-  const record = {
-    id: `hand-${Date.now()}`,
-    createdAt: new Date().toISOString(),
-    title: handTitle(state.lastReviewPayload),
-    payload: state.lastReviewPayload,
-    reviewText: state.lastReviewText
-  };
-  writeStorage(storageKeys.favorites, [record, ...records]);
+  const record = reviewHandRecord(state.lastReviewPayload, state.lastReviewText, { favorite: true });
+  writeStorage(storageKeys.favorites, [record, ...records.filter(item => item.id !== record.id)]);
   savePlayersFromPayload(state.lastReviewPayload, record);
   renderFavoriteList();
   $("favoriteReview").textContent = "已收藏";
@@ -1480,60 +2072,102 @@ function renderFavoriteList() {
 }
 
 function renderPlayerInfoList() {
-  const records = Object.values(playerRecords()).sort((a, b) => new Date(b.lastSeenAt) - new Date(a.lastSeenAt));
+  const records = Object.entries(playerRecords()).sort(([, a], [, b]) => new Date(b.lastSeenAt) - new Date(a.lastSeenAt));
   $("playerInfoList").innerHTML = records.length ? records.map(player => `
     <article class="record-card player-record">
       <div>
-        <strong>${escapeHtml(player.id)}</strong>
-        <span>${escapeHtml(player.style || "普通")} · 有效筹码 ${escapeHtml(player.stack || "-")} · 关联手牌 ${escapeHtml(playerHandCount(player))}</span>
+        <strong>${escapeHtml(player[1].id)}</strong>
+        <span>${escapeHtml(player[1].style || "普通")} · 有效筹码 ${escapeHtml(player[1].stack || "-")} · 关联手牌 ${escapeHtml(playerHandCount(player[1]))}</span>
       </div>
-      <button type="button" data-view-player="${escapeHtml(player.id)}">查看</button>
+      <button type="button" data-view-player="${escapeHtml(player[0])}">查看</button>
     </article>
   `).join("") : `<div class="empty-state">还没有保存过 ID 的玩家。</div>`;
 }
 
+function playerBaselineText(player) {
+  return player.baselineText || player.analysisText || "";
+}
+
+function compactPlayerHand(hand) {
+  const summary = hand.handSummary || {};
+  return {
+    title: hand.title || summary.title,
+    createdAt: hand.createdAt,
+    position: hand.position || summary.player?.position,
+    style: hand.style || summary.player?.style,
+    stack: hand.stack ?? summary.player?.stack,
+    invested: hand.invested ?? summary.player?.invested,
+    remaining: hand.remaining ?? summary.player?.remaining,
+    folded: hand.folded ?? summary.player?.folded,
+    game: summary.game || {},
+    playerActions: hand.actions || summary.playerActions || [],
+    fullActionLine: summary.fullActionLine || [],
+    previousHandReviewExcerpt: String(hand.reviewText || "").slice(0, 900)
+  };
+}
+
+function recentPlayerHands(player) {
+  return (Array.isArray(player.hands) ? player.hands : [])
+    .slice(0, playerBaselineRecentHands)
+    .map(compactPlayerHand);
+}
+
 function playerAnalysisPrompt(player) {
-  const hands = (player.hands || []).map(hand => ({
-    title: hand.title,
-    position: hand.position,
-    style: hand.style,
-    stack: hand.stack,
-    invested: hand.invested,
-    remaining: hand.remaining,
-    folded: hand.folded,
-    actions: hand.actions,
-    handReviewExcerpt: String(hand.reviewText || "").slice(0, 1800)
-  }));
+  const handCount = playerHandCount(player);
+  const baseline = playerBaselineText(player);
+  const recentHands = recentPlayerHands(player);
   return [
-    "你是一名德州扑克玩家画像分析教练。",
-    "请只分析指定玩家的打法风格，不要复述整手牌。",
-    "请根据该玩家在关联手牌中的位置、行动线、投入、摊牌前后决策以及已有复盘内容，输出：",
-    "1. 玩家类型判断（松凶/紧凶/紧弱/松弱/普通，可带置信度）。",
-    "2. 翻前倾向。",
-    "3. 翻后倾向。",
-    "4. 可 exploit 的漏洞。",
-    "5. 下次遇到此玩家的实战调整。",
-    "如果样本不足，请明确说明不足，并给出暂定判断。",
+    "你是一名德州扑克玩家画像与 exploit 策略教练。",
+    "目标：为指定玩家维护一份可长期迭代的玩家基线，并给出与该玩家对战的策略建议。",
+    "重要限制：为了节省 tokens，输入不会包含该玩家所有历史手牌。你只能使用“上一版玩家基线”和“最近 3 手关联手牌”更新判断。不要要求用户补发全部历史记录。",
+    "牌局背景：线下娱乐局，常见 ante 和无限鱿鱼/血战鱿鱼；翻前 open 3-20BB 属于正常现场尺度。分析玩家倾向时不要套用线上常规 2-3BB open 基准。",
+    "请输出中文，结构必须包含：",
+    "1. 玩家基线更新：用 6-10 条短句生成可替代旧基线的新版本，包含玩家类型、翻前倾向、翻后倾向、尺度偏好、摊牌/弃牌倾向、情绪或娱乐局特征、样本置信度。",
+    "2. 当前打法风格判断：在松凶/紧凶/紧弱/松弱/普通中选择，允许给混合判断和置信度。",
+    "3. 对战策略建议：翻前、翻后、价值下注、诈唬、跟注/弃牌阈值分别给建议。",
+    "4. 最近 3 手带来的变化：说明相比旧基线是否需要更新判断。",
+    "5. 下一次重点观察：列 3 个以后记录手牌时最该观察的点。",
+    "如果上一版基线为空，请把最近手牌作为初始基线；如果最近手牌不足 3 手，仍可更新，但要说明置信度较低。",
     "",
     "玩家数据 JSON：",
-    JSON.stringify({ id: player.id, currentStyle: player.style, hands }, null, 2)
+    JSON.stringify({
+      id: player.id,
+      savedStyle: player.style,
+      totalRecordedHands: handCount,
+      previousBaseline: baseline || "暂无旧基线，这是首次建立玩家基线。",
+      previousBaselineHandCount: Number(player.baselineHandCount || 0),
+      recentHandsIncluded: recentHands.length,
+      recentHands
+    }, null, 2)
   ].join("\n");
 }
 
 function renderPlayerDetail(player) {
   const hands = Array.isArray(player.hands) ? player.hands : [];
+  const handCount = playerHandCount(player);
+  const baseline = playerBaselineText(player);
+  const canAnalyze = handCount >= minPlayerAnalysisHands;
+  const analyzedCount = Number(player.baselineHandCount || (player.analysisText ? handCount : 0));
+  const baselineStatus = baseline
+    ? `已基于 ${escapeHtml(analyzedCount || handCount)} 手牌建立基线${handCount > analyzedCount ? ` · 新增 ${escapeHtml(handCount - analyzedCount)} 手待更新` : ""}`
+    : "还未建立玩家基线";
   $("recordDialogMeta").textContent = `关联手牌 ${hands.length}`;
-  $("recordDialogTitle").textContent = `玩家 ${player.id}`;
+  $("recordDialogTitle").textContent = `玩家主页 · ${player.id}`;
   $("recordDialogBody").innerHTML = `
     <div class="readonly-block">
       <h3>玩家档案</h3>
       <p>当前类型：${escapeHtml(player.style || "普通")} · 有效筹码 ${escapeHtml(player.stack || "-")}</p>
       <p>最后记录：${escapeHtml(formatDateTime(player.lastSeenAt))}</p>
     </div>
-    <div class="readonly-block">
-      <h3>打法风格分析</h3>
-      <button type="button" class="primary wide" data-analyze-player="${escapeHtml(player.id)}">AI 分析打法风格</button>
-      <pre id="playerAnalysisText" class="model-review">${escapeHtml(player.analysisText || "还没有分析。点击上方按钮后，会基于此玩家关联手牌进行分析。")}</pre>
+    <div class="readonly-block player-strategy-card">
+      <h3>游戏风格与对战策略</h3>
+      <p class="baseline-meta">${baselineStatus}</p>
+      ${canAnalyze ? `
+        <button type="button" class="primary wide" data-analyze-player="${escapeHtml(player.id)}">${baseline ? "更新玩家基线与策略" : "建立玩家基线与策略"}</button>
+        <pre id="playerAnalysisText" class="model-review">${escapeHtml(baseline || "还没有分析。点击上方按钮后，会基于最近 3 手记录建立玩家基线。")}</pre>
+      ` : `
+        <div class="analysis-gate" id="playerAnalysisText">需要记录大于等于 3 手，才可分析出此玩家的风格与对战策略。当前已记录 ${escapeHtml(handCount)} 手。</div>
+      `}
     </div>
     <div class="readonly-block">
       <h3>关联手牌</h3>
@@ -1542,43 +2176,55 @@ function renderPlayerDetail(player) {
           <strong>${escapeHtml(hand.title)}</strong>
           <span>${escapeHtml(formatDateTime(hand.createdAt))} · ${escapeHtml(hand.position || "")} · 投入 ${escapeHtml(hand.invested || 0)} · ${hand.folded ? "已弃牌" : "未弃牌"}</span>
           ${hand.actions?.length ? `<ol>${hand.actions.map(action => `<li>${escapeHtml(action)}</li>`).join("")}</ol>` : "<p>暂无该玩家行动记录</p>"}
-          <button type="button" data-view-favorite="${escapeHtml(hand.favoriteId)}">查看完整手牌</button>
+          ${hand.favoriteId ? `<button type="button" data-view-favorite="${escapeHtml(hand.favoriteId)}">查看完整手牌</button>` : "<span class=\"mini-note\">这手牌未收藏，已用于玩家画像记录。</span>"}
         </article>
-      `).join("") : "<p>暂无关联手牌。收藏包含此 ID 的复盘后会出现在这里。</p>"}
+      `).join("") : "<p>暂无关联手牌。完成包含此 ID 的牌谱分析后会出现在这里。</p>"}
     </div>
   `;
-  $("recordDialog").showModal();
+  showDialog($("recordDialog"));
 }
 
 function openPlayerRecord(id) {
-  const player = playerRecords()[id];
+  const player = playerRecords()[playerRecordKey(id)];
   if (!player) return;
   renderPlayerDetail(player);
 }
 
 async function analyzePlayerStyle(id) {
   const records = playerRecords();
-  const player = records[id];
+  const key = playerRecordKey(id);
+  const player = records[key];
   if (!player) return;
+  const handCount = playerHandCount(player);
+  if (handCount < minPlayerAnalysisHands) {
+    $("playerAnalysisText").textContent = `需要记录大于等于 3 手，才可分析出此玩家的风格与对战策略。当前已记录 ${handCount} 手。`;
+    return;
+  }
   if (!ensureMemberForReview()) {
     $("playerAnalysisText").textContent = "当前账号还不能使用 AI 分析。";
     return;
   }
-  $("playerAnalysisText").textContent = "正在分析此玩家打法风格...";
+  $("playerAnalysisText").textContent = playerBaselineText(player)
+    ? "正在用旧基线和最近 3 手牌更新此玩家画像..."
+    : "正在基于最近手牌建立此玩家基线...";
   try {
     const data = await apiJson("/api/player-analysis", {
       method: "POST",
       body: JSON.stringify({
-      messages: [
-        { role: "system", content: "你是一名严谨的德州扑克玩家画像分析教练。" },
-        { role: "user", content: playerAnalysisPrompt(player) }
-      ]
-    })
+        messages: [
+          { role: "system", content: "你是一名严谨的德州扑克玩家画像与 exploit 策略教练。你要维护可迭代玩家基线，只基于上一版基线和最近 3 手记录更新，不要求全部历史手牌。" },
+          { role: "user", content: playerAnalysisPrompt(player) }
+        ]
+      }),
+      timeoutMs: 180000
     });
     const text = data.text || "模型没有返回文本。";
-    records[id] = {
+    records[key] = {
       ...player,
       analysisText: text,
+      baselineText: text,
+      baselineHandCount: handCount,
+      baselineRecentFavoriteIds: (player.hands || []).slice(0, playerBaselineRecentHands).map(hand => hand.favoriteId),
       analysisAt: new Date().toISOString()
     };
     writeStorage(storageKeys.players, records);
@@ -1601,7 +2247,7 @@ function openFavoriteRecord(id) {
       <pre class="model-review">${escapeHtml(record.reviewText)}</pre>
     </div>
   `;
-  $("recordDialog").showModal();
+  showDialog($("recordDialog"));
 }
 
 function setActiveTab(tab) {
@@ -1639,10 +2285,10 @@ function renderReviewLoading() {
   $("reviewOutput").innerHTML = `
     <div class="review-loading">
       <strong>正在进行牌谱分析...</strong>
-      <span>会逐街分析行动线、对手范围和 GTO 建议。</span>
+      <span>会以线下娱乐局为主，逐街分析行动线、对手范围和实战建议。</span>
     </div>
   `;
-  $("reviewDialog").showModal();
+  showDialog($("reviewDialog"));
 }
 
 function renderReviewMarkdown(text) {
@@ -1659,12 +2305,23 @@ function renderReviewError(message) {
       <span>${message}</span>
     </div>
   `;
-  $("reviewDialog").showModal();
+  showDialog($("reviewDialog"));
+}
+
+function openReviewConfirm(message = "本手牌行动已经完成，可以现在进行牌谱分析。") {
+  const copy = $("reviewConfirmDialog").querySelector(".dialog-copy");
+  if (copy) copy.textContent = message;
+  showDialog($("reviewConfirmDialog"));
 }
 
 async function runDeepSeekReview() {
   if (!ensureMemberForReview()) return;
 
+  const deckError = showdownInputError() || currentDeckError();
+  if (deckError) {
+    renderReviewError(deckError);
+    return;
+  }
   renderReviewLoading();
   const payload = handPayload();
   state.lastReviewPayload = payload;
@@ -1675,23 +2332,35 @@ async function runDeepSeekReview() {
       messages: [
         {
           role: "system",
-          content: "你是一名严谨的德州扑克 GTO 复盘教练，必须逐街分析行动线、范围和可执行建议。"
+          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，必须以线下实战盈利和玩家倾向为主，逐街分析行动线、范围和可执行建议；GTO 只作为补充参考。本牌局通常有 ante 和无限鱿鱼，翻前 3-20BB open 属于常见现场尺度，不要反复解释。若 payload.hasKnownOpponentCards=true，必须先按不知道对手底牌的实战视角分析，再用已知底牌复盘对手真实思路和打法倾向；禁止用已知底牌倒推第一部分结论。只有 missingActionsOnCurrentStreet 明确列出玩家时，才可指出漏行动。做摊牌和范围结论前必须准确比较五张最佳牌。"
         },
         {
           role: "user",
           content: reviewPrompt(payload)
         }
       ]
-    })
+    }),
+    timeoutMs: 180000
   });
   const text = data.text;
   state.lastReviewText = text || "模型没有返回文本。";
   renderReviewMarkdown(text || "模型没有返回文本。");
+  savePlayersFromPayload(payload, reviewHandRecord(payload, state.lastReviewText));
 }
 
 function completeStreet() {
   const street = currentStreet();
-  if (allLivePlayersAllIn() && street !== "River") {
+  if (handEndedByFolds()) {
+    $("currentAction").textContent = "只剩一名未弃牌玩家，本手牌行动已结束，可以进行牌谱分析";
+    openReviewConfirm("只剩一名未弃牌玩家，本手牌可以开始牌谱分析。");
+    return;
+  }
+  if (allInRunoutReady()) {
+    if (street === "River") {
+      $("currentAction").textContent = "河牌行动已完成，可以进行牌谱分析";
+      openReviewConfirm("河牌行动已完成，本手牌可以开始牌谱分析。");
+      return;
+    }
     openDealDialog();
     return;
   }
@@ -1703,7 +2372,8 @@ function completeStreet() {
     return;
   }
   if (street === "River") {
-    $("currentAction").textContent = "河牌行动已完成，可以点击右侧复盘";
+    $("currentAction").textContent = "河牌行动已完成，可以进行牌谱分析";
+    openReviewConfirm("河牌行动已完成，本手牌可以开始牌谱分析。");
     return;
   }
   openDealDialog();
@@ -1716,7 +2386,7 @@ async function analyzeHand() {
       <span>会把整手牌、每条街行动线、玩家风格和范围信息发送到你的后端分析服务。</span>
     </div>
   `;
-  $("reviewDialog").showModal();
+  showDialog($("reviewDialog"));
   try {
     await runDeepSeekReview();
   } catch (error) {
@@ -1731,7 +2401,7 @@ function applyPlayerEdits() {
   const oldId = player.id;
   player.stack = Number($("playerStack").value || 0);
   player.style = $("playerStyle").value;
-  player.id = $("playerId").value.trim() || oldId;
+  player.id = normalizePlayerId($("playerId").value) || oldId;
   if ($("playerDealer").checked || player.dealer) setDealer(index);
   state.actions.forEach(action => {
     if (action.seatIndex === index && action.playerId === oldId) action.playerId = player.id;
@@ -1742,7 +2412,7 @@ function applyPlayerEdits() {
 
 function savePlayer() {
   if (!applyPlayerEdits()) return;
-  $("seatDialog").close();
+  closeDialog($("seatDialog"));
   render();
 }
 
@@ -1758,15 +2428,15 @@ function deletePlayer() {
   streets.forEach(street => normalizeStreetCallAmounts(street));
   refreshFoldedStates();
   state.step = Math.min(state.step, state.actions.length - 1);
-  $("seatDialog").close();
+  closeDialog($("seatDialog"));
   render();
 }
 
 function addPlayerToSeat() {
   const index = state.selectedSeat;
   state.seats[index] = {
-    id: $("newPlayerId").value.trim() || `P${index + 1}`,
-    stack: Number($("newPlayerStack").value || 200),
+    id: normalizePlayerId($("newPlayerId").value) || `P${index + 1}`,
+    stack: Number($("newPlayerStack").value || defaultPlayerStack()),
     style: $("newPlayerStyle").value,
     hero: !state.seats.some(player => player?.hero),
     dealer: !state.seats.some(player => player?.dealer),
@@ -1774,11 +2444,15 @@ function addPlayerToSeat() {
   };
   savePlayerRecord(state.seats[index]);
   state.playerCount = Math.min(9, Math.max(2, occupiedPlayerCount()));
-  $("seatDialog").close();
+  closeDialog($("seatDialog"));
   render();
 }
 
 function bind() {
+  ["seatDialog", "dealDialog", "returnDialog", "reviewDialog", "recordDialog", "reviewConfirmDialog", "showdownDialog"].forEach(id => {
+    $(id).addEventListener("close", () => handleDialogClosed($(id)));
+  });
+
   $("seatLayer").addEventListener("click", event => {
     const seatButton = event.target.closest("[data-seat]");
     if (!seatButton) return;
@@ -1800,15 +2474,21 @@ function bind() {
   });
 
   $("recordAction").addEventListener("click", () => addAction(state.selectedAction));
+  $("betShortcutPicks").addEventListener("click", event => {
+    const button = event.target.closest("[data-pot-bet]");
+    if (!button) return;
+    applyPotShortcut(Number(button.dataset.potBet));
+  });
   $("seatDialog").addEventListener("click", event => {
     if (event.target !== $("seatDialog")) return;
     confirmBackdropAction();
   });
   $("completeStreet").addEventListener("click", completeStreet);
   $("returnHand").addEventListener("click", openReturnDialog);
+  $("resetHandTop").addEventListener("click", resetHandToStart);
   $("returnPrevRound").addEventListener("click", returnToPreviousRound);
   $("restartHand").addEventListener("click", () => {
-    $("returnDialog").close();
+    closeDialog($("returnDialog"));
     resetHandToStart();
   });
   $("playerCount").addEventListener("change", () => setPlayerCount($("playerCount").value));
@@ -1840,6 +2520,69 @@ function bind() {
     } catch (error) {
       renderReviewError(error.message || "无法完成牌谱分析。请检查会员权限和服务端配置。");
     }
+  });
+  $("startReviewFromConfirm").addEventListener("click", async () => {
+    closeDialog($("reviewConfirmDialog"));
+    await analyzeHand();
+  });
+  $("openShowdownFromConfirm").addEventListener("click", () => {
+    closeDialog($("reviewConfirmDialog"));
+    openShowdownDialog();
+  });
+  $("startReviewWithShowdown").addEventListener("click", async () => {
+    const error = showdownInputError();
+    if (error) {
+      $("showdownTitle").textContent = error;
+      return;
+    }
+    closeDialog($("showdownDialog"));
+    await analyzeHand();
+  });
+  $("showdownPlayers").addEventListener("click", event => {
+    const unknownSeat = event.target.closest("[data-showdown-unknown]")?.dataset.showdownUnknown;
+    if (unknownSeat !== undefined) {
+      state.showdownHands[unknownSeat] = {
+        known: false,
+        cards: [
+          { rank: "", suit: "" },
+          { rank: "", suit: "" }
+        ]
+      };
+      if (state.showdownEditingSeat === Number(unknownSeat)) state.showdownEditingSeat = null;
+      $("showdownTitle").textContent = "输入其他玩家底牌";
+      renderShowdownDialog();
+      render();
+      return;
+    }
+    const editSeat = event.target.closest("[data-showdown-edit]")?.dataset.showdownEdit;
+    if (editSeat === undefined) return;
+    state.showdownEditingSeat = Number(editSeat);
+    state.selectedShowdownCard = 0;
+    ensureShowdownHand(state.showdownEditingSeat).known = true;
+    $("showdownTitle").textContent = "输入其他玩家底牌";
+    renderShowdownDialog();
+  });
+  $("showdownCards").addEventListener("click", event => {
+    const button = event.target.closest("[data-showdown-card]");
+    if (!button) return;
+    state.selectedShowdownCard = Number(button.dataset.showdownCard);
+    renderShowdownCards();
+  });
+  $("showdownRankPicker").addEventListener("click", event => {
+    const button = event.target.closest("[data-showdown-rank]");
+    if (!button || state.showdownEditingSeat === null) return;
+    ensureShowdownHand(state.showdownEditingSeat).cards[state.selectedShowdownCard].rank = button.dataset.showdownRank;
+    renderShowdownCards();
+  });
+  $("showdownSuitPicker").addEventListener("click", event => {
+    const button = event.target.closest("[data-showdown-suit]");
+    if (!button || state.showdownEditingSeat === null) return;
+    ensureShowdownHand(state.showdownEditingSeat).cards[state.selectedShowdownCard].suit = button.dataset.showdownSuit;
+    const duplicated = warnDuplicateShowdownCard();
+    if (!duplicated && state.selectedShowdownCard < 1) state.selectedShowdownCard += 1;
+    renderShowdownDialog();
+    render();
+    if (duplicated) warnDuplicateShowdownCard();
   });
   $("adminLogin").addEventListener("click", adminLogin);
   $("accountLogin").addEventListener("click", accountLogin);
@@ -1937,7 +2680,11 @@ function bind() {
     render();
   });
 
-  ["heroCards", "blinds", "anteAmount", "straddleAmount", "unlimitedStraddle"].forEach(id => {
+  $("blinds").addEventListener("input", () => {
+    applyDefaultStacksBeforeAction();
+    render();
+  });
+  ["heroCards", "anteAmount", "straddleAmount", "unlimitedStraddle"].forEach(id => {
     $(id).addEventListener("input", render);
   });
   $("unlimitedStraddle").addEventListener("change", render);
@@ -1960,34 +2707,14 @@ function bind() {
     const button = event.target.closest("[data-suit]");
     if (!button) return;
     state.dealCards[state.selectedDealCard].suit = button.dataset.suit;
-    if (state.selectedDealCard < state.dealCards.length - 1) state.selectedDealCard += 1;
+    const duplicated = warnDuplicateDealCard();
+    if (!duplicated && state.selectedDealCard < state.dealCards.length - 1) state.selectedDealCard += 1;
     renderDealCards();
+    if (duplicated) warnDuplicateDealCard();
   });
 
   $("confirmDeal").addEventListener("click", confirmDeal);
 
-  $("exportJson").addEventListener("click", () => {
-    const payload = {
-      playerCount: occupiedPlayerCount(),
-      blinds: $("blinds").value,
-      ante: Number($("anteAmount").value || 0),
-      straddle: {
-        finiteAmount: Number($("straddleAmount").value || 0),
-        unlimited: $("unlimitedStraddle").checked
-      },
-      heroCards: $("heroCards").value,
-      board: boardSummary(),
-      seats: state.seats,
-      actions: state.actions
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "poker-hand-review.json";
-    link.click();
-    URL.revokeObjectURL(url);
-  });
 }
 
 bind();
