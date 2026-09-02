@@ -307,7 +307,7 @@ async function callDeepSeek(messages) {
         model,
         messages,
         thinking: { type: "disabled" },
-        max_tokens: 6000,
+        max_tokens: 1800,
         stream: false
       })
     });
