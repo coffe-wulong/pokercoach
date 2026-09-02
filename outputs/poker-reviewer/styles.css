@@ -445,6 +445,18 @@ label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
   gap: 8px;
 }
 
+.topbar-actions {
+  display: grid;
+  justify-items: end;
+  gap: 5px;
+}
+
+.app-version {
+  color: rgba(154, 164, 178, .78);
+  font-size: 11px;
+  line-height: 1;
+}
+
 .controls button {
   width: 44px;
   height: 42px;
@@ -1830,6 +1842,14 @@ textarea:focus {
 
   .controls {
     gap: 7px;
+  }
+
+  .topbar-actions {
+    gap: 4px;
+  }
+
+  .app-version {
+    font-size: 10px;
   }
 
   .controls .return-action,
