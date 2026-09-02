@@ -1803,7 +1803,7 @@ function handPayload() {
   return {
     gameProfile: {
       environment: "线下娱乐局",
-      analysisPriority: "实战盈利与玩家倾向优先，GTO 仅作补充参考",
+      analysisPriority: "线下娱乐局实战盈利与玩家倾向优先，不按 GTO 玩家假设分析",
       handStrengthRule: "分析前必须精确比较五张最佳牌；例如 Hero AK 在 A-K-8-4-5 上是 AAKK8，压制 A8 的 AA88K，A8 不是能赢 Hero AK 的组合",
       normalPreflopOpenRangeBB: "3-20BB",
       openSizeRule: "3BB 到 20BB 的翻前 open 在本局型中都属于正常尺度，不能仅因数值大于常规线上尺度而判定异常",
@@ -1872,20 +1872,20 @@ function handPayload() {
 
 function reviewPrompt(payload) {
   return [
-    "你是线下德州扑克娱乐局复盘教练。请用中文输出短报告，控制在 900-1300 字，不要长篇铺垫。",
+    "你是线下德州扑克娱乐局复盘教练。请用中文输出精炼报告，控制在 800-1100 字，不要摘要，不要长篇铺垫。",
     "分析基准：线下娱乐局，常见 ante 和无限鱿鱼；ante 使用 payload 里的实际数额，不是固定 1BB；翻前 open 3-20BB 属于常规现场尺度，不要反复解释，也不要套用线上 2-3BB 标准。",
-    "必须结合行动线、位置、有效筹码、底池、玩家风格和公共牌。GTO 只做一句补充，不要展开理论课。",
+    "必须结合行动线、位置、有效筹码、底池、玩家风格、公共牌和下注尺度。不要使用 GTO 玩家假设，也不要输出 GTO 参考段落。",
     "牌力判断要先精确比较五张最佳牌，避免把被 Hero 压制的弱两对误列为赢牌组合。",
     "showdownHands 里 known=true 才代表已知底牌；cards=未知 时不要假设具体牌，只能按范围分析。",
     "如果 hasKnownOpponentCards=true，必须分两层分析：先完全假装不知道对手底牌，只按行动线和范围做实战决策分析；再用已知底牌复盘对手真实思路、打法倾向和暴露的问题。不要用已知底牌倒推第一部分结论。",
     "actionKind=forced_post 是强制投入，不是主动行动；只有 missingActionsOnCurrentStreet 里的玩家才算漏行动。",
     "amount 是本次实际投入，targetAmount 是跟到/加注到的目标，previousAction 表示该玩家本街之前已有动作。",
-    "输出格式固定为 5 段：",
-    "1. 摘要：1-2 句。",
-    "2. 未知底牌视角：Preflop/Flop/Turn/River 每街最多 2 句，只按行动线、范围和赔率分析。",
-    "3. 已知底牌复盘：如果有已知对手底牌，说明这些底牌如何解释对手思路、打法倾向和错误；如果没有已知对手底牌，则写“无已知对手底牌”。",
-    "4. 实战建议：给出下一次更赚钱的动作、下注尺度和 exploit 调整。",
-    "5. 最大错误：只列 1-2 个最重要问题。",
+    "输出格式固定为 5 段，不要增加摘要段：",
+    "1. Preflop 起手牌范围：按位置和翻前行动估计对方起手牌范围，并结合 open/3B/跟注/all-in 尺度判断范围强弱。",
+    "2. Flop 范围变化：结合翻牌牌面和下注尺度，说明各方范围如何变化，下注的价值对象是谁、希望打走的对象是谁。",
+    "3. Turn 范围变化：结合转牌牌面和下注尺度，说明价值范围、诈唬/半诈唬范围、继续跟注范围如何变化。",
+    "4. River 范围变化：结合河牌牌面和下注尺度，说明摊牌价值、薄价值、诈唬和 bluff-catch 阈值。",
+    "5. 实战结论：只给 2-4 条最重要的线下 exploit 建议。若 hasKnownOpponentCards=true，最后补 2-3 句已知底牌复盘，解释对手真实思路和打法倾向；否则不要写已知底牌复盘。",
     "",
     "牌局数据 JSON：",
     JSON.stringify(payload)
@@ -2332,7 +2332,7 @@ async function runDeepSeekReview() {
       messages: [
         {
           role: "system",
-          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，必须以线下实战盈利和玩家倾向为主，逐街分析行动线、范围和可执行建议；GTO 只作为补充参考。本牌局通常有 ante 和无限鱿鱼，翻前 3-20BB open 属于常见现场尺度，不要反复解释。若 payload.hasKnownOpponentCards=true，必须先按不知道对手底牌的实战视角分析，再用已知底牌复盘对手真实思路和打法倾向；禁止用已知底牌倒推第一部分结论。只有 missingActionsOnCurrentStreet 明确列出玩家时，才可指出漏行动。做摊牌和范围结论前必须准确比较五张最佳牌。"
+          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，只按线下实战盈利和玩家倾向分析，不输出 GTO 段落。本牌局通常有 ante 和无限鱿鱼，翻前 3-20BB open 属于常见现场尺度，不要反复解释。分析必须按每条街牌面、行动线、下注尺度推断范围变化：价值对象、想打走的对象、继续范围和弃牌范围。若 payload.hasKnownOpponentCards=true，先按不知道对手底牌的实战视角分析，再用已知底牌复盘对手真实思路和打法倾向；禁止用已知底牌倒推前面的范围分析。"
         },
         {
           role: "user",
