@@ -616,7 +616,7 @@ function actionSummary(action, increment = amountFor(action)) {
 function actionsWithAmounts(actions = state.actions) {
   const streetTotals = {};
   const totalInvested = {};
-  return actions.map(action => {
+  return actions.map((action, actionIndex) => {
     const streetKey = `${action.street}:${action.seatIndex}`;
     const previousStreetTotal = streetTotals[streetKey] || 0;
     const totalKey = String(action.seatIndex);
@@ -634,6 +634,7 @@ function actionsWithAmounts(actions = state.actions) {
     totalInvested[totalKey] = previousTotalInvested + amountFor(action);
     return {
       ...action,
+      actionIndex,
       previousAction: action.previousAction || null,
       incrementAmount,
       stackBeforeAction,
@@ -1602,6 +1603,12 @@ function addAction(type) {
   const existingIndex = existingIndexes[0] ?? -1;
   const existingAction = existingIndex >= 0 ? state.actions[existingIndex] : null;
   const actionIndex = existingIndex >= 0 ? existingIndex : state.actions.length;
+  const targetAfterExistingAction = targetAmountForStreet(street, existingIndex);
+  const isResponseToLaterTarget = Boolean(
+    existingAction
+    && ["call", "fold", "allin"].includes(type)
+    && targetAfterExistingAction > actionStreetTarget(existingAction)
+  );
   const committedBeforeAction = streetBettingCommittedBySeat(street, index, existingIndex, actionIndex);
   const previousCommitted = existingAction ? committedBeforeAction + amountFor(existingAction) : committedBeforeAction;
   const previousAction = type === "fold" && existingAction
@@ -1622,10 +1629,8 @@ function addAction(type) {
     : type === "call" && existingAction?.previousAction
       ? existingAction.previousAction
       : null;
-  const callTarget = type === "call"
-    ? targetAmountForStreet(street, existingIndex)
-    : 0;
-  const currentTarget = targetAmountForStreet(street, existingIndex);
+  const callTarget = type === "call" ? targetAfterExistingAction : 0;
+  const currentTarget = targetAfterExistingAction;
   const raiseTarget = type === "raise" ? Math.max(0, Number($("actionAmount").value || 0)) : 0;
   if (type === "raise" && raiseTarget <= currentTarget) {
     $("currentAction").textContent = currentTarget > 0
@@ -1671,10 +1676,16 @@ function addAction(type) {
     action.callToAmount = callTarget;
   }
   if (existingIndex >= 0) {
-    state.actions[existingIndex] = action;
     const duplicateIndexes = new Set(existingIndexes.slice(1));
-    state.actions = state.actions.filter((_, actionIndex) => !duplicateIndexes.has(actionIndex));
-    state.step = Math.min(existingIndex, state.actions.length - 1);
+    if (isResponseToLaterTarget) {
+      state.actions = state.actions.filter((_, actionIndex) => actionIndex !== existingIndex && !duplicateIndexes.has(actionIndex));
+      state.actions.push(action);
+      state.step = state.actions.length - 1;
+    } else {
+      state.actions[existingIndex] = action;
+      state.actions = state.actions.filter((_, actionIndex) => !duplicateIndexes.has(actionIndex));
+      state.step = Math.min(existingIndex, state.actions.length - 1);
+    }
   } else {
     state.actions.push(action);
     state.step = state.actions.length - 1;
@@ -1794,12 +1805,60 @@ function missingActionSummary(street = currentStreet()) {
   }));
 }
 
+function isCallFacingAllIn(action, enrichedActions) {
+  if (action.type !== "call") return false;
+  const target = actionStreetTarget(action);
+  return enrichedActions.some(previous => (
+    previous.street === action.street
+    && previous.actionIndex < action.actionIndex
+    && previous.type === "allin"
+    && actionStreetTarget(previous) <= target
+  ));
+}
+
+function actionDecisionMeaning(action, enrichedActions) {
+  if (action.type === "allin") return "主动 All-in";
+  if (isCallFacingAllIn(action, enrichedActions)) return "跟注对手 All-in，不是主动 All-in";
+  if (action.type === "call") return "跟注到 targetAmount";
+  if (action.type === "raise") return "下注或加注到 targetAmount";
+  if (action.type === "fold") return "弃牌，已投入筹码保留在底池";
+  if (action.type === "check") return "过牌";
+  if (action.forced && !action.manual) return "强制投入，不是主动行动";
+  return "玩家主动行动";
+}
+
+function allInRunoutInfo(enrichedActions) {
+  const allInStreetIndex = streets.findIndex(street => enrichedActions.some(action => action.street === street && action.type === "allin"));
+  if (allInStreetIndex < 0) {
+    return {
+      hasAllIn: false,
+      allInStreet: "",
+      laterStreetsWithoutPlayerActions: []
+    };
+  }
+  const laterStreetsWithoutPlayerActions = streets
+    .slice(allInStreetIndex + 1)
+    .filter(street => !enrichedActions.some(action => (
+      action.street === street
+      && (!action.forced || Boolean(action.manual))
+    )));
+  return {
+    hasAllIn: true,
+    allInStreet: streets[allInStreetIndex],
+    laterStreetsWithoutPlayerActions,
+    analysisRule: laterStreetsWithoutPlayerActions.length
+      ? "All-in 后这些街道没有玩家行动，只作为发牌/摊牌结果，不再分析范围变化、下注价值对象或打走对象。"
+      : ""
+  };
+}
+
 function handPayload() {
   const positions = positionsForSeats();
   const { pot, totals } = totalsUntil(state.actions.length - 1);
   const enrichedActions = actionsWithAmounts();
   const anteAmount = Number($("anteAmount").value || 0);
   const showdownHands = showdownPayload();
+  const allInInfo = allInRunoutInfo(enrichedActions);
   return {
     gameProfile: {
       environment: "线下娱乐局",
@@ -1823,6 +1882,7 @@ function handPayload() {
     },
     currentStreet: currentStreet(),
     missingActionsOnCurrentStreet: missingActionSummary(currentStreet()),
+    allInRunout: allInInfo,
     pot,
     heroCards: $("heroCards").value.trim(),
     hasKnownOpponentCards: showdownHands.some(hand => !hand.hero && hand.known),
@@ -1857,7 +1917,14 @@ function handPayload() {
           forcedMeaning: action.forced && !action.manual ? "强制投入，例如 ante / SB / BB；这不是玩家主动决策" : "",
           amount: amountFor(action),
           targetAmount: actionStreetTarget(action),
+          facingTargetBeforeAction: targetAmountBeforeAction(action.street, action.actionIndex),
           incrementAmount: action.incrementAmount,
+          additionalAmountAfterPreviousAction: action.previousAction
+            ? Math.max(0, actionStreetTarget(action) - Number(action.previousAction.amount || 0))
+            : amountFor(action),
+          decisionMeaning: actionDecisionMeaning(action, enrichedActions),
+          isAllInAction: action.type === "allin",
+          isCallFacingAllIn: isCallFacingAllIn(action, enrichedActions),
           stackBeforeAction: action.stackBeforeAction,
           stackAfterAction: action.stackAfterAction,
           behindBeforeAction: action.behindBeforeAction,
@@ -1879,12 +1946,14 @@ function reviewPrompt(payload) {
     "showdownHands 里 known=true 才代表已知底牌；cards=未知 时不要假设具体牌，只能按范围分析。",
     "如果 hasKnownOpponentCards=true，必须分两层分析：先完全假装不知道对手底牌，只按行动线和范围做实战决策分析；再用已知底牌复盘对手真实思路、打法倾向和暴露的问题。不要用已知底牌倒推第一部分结论。",
     "actionKind=forced_post 是强制投入，不是主动行动；只有 missingActionsOnCurrentStreet 里的玩家才算漏行动。",
-    "amount 是本次实际投入，targetAmount 是跟到/加注到的目标，previousAction 表示该玩家本街之前已有动作。",
+    "必须优先读取 decisionMeaning：isCallFacingAllIn=true 表示该玩家是在跟注对手 All-in，不是主动 All-in；isAllInAction=true 才是主动 All-in。",
+    "amount 是这条最终动作计入底池的金额，targetAmount 是跟到/加注到的目标；若有 previousAction，additionalAmountAfterPreviousAction 才是二次决策时新补的金额。",
+    "如果 allInRunout.laterStreetsWithoutPlayerActions 包含 Turn/River，说明这些街道 All-in 后没有玩家动作，只作为发牌结果，不要分析范围变化、下注价值对象或打走对象。",
     "输出格式固定为 5 段，不要增加摘要段：",
     "1. Preflop 起手牌范围：按位置和翻前行动估计对方起手牌范围，并结合 open/3B/跟注/all-in 尺度判断范围强弱。",
     "2. Flop 范围变化：结合翻牌牌面和下注尺度，说明各方范围如何变化，下注的价值对象是谁、希望打走的对象是谁。",
-    "3. Turn 范围变化：结合转牌牌面和下注尺度，说明价值范围、诈唬/半诈唬范围、继续跟注范围如何变化。",
-    "4. River 范围变化：结合河牌牌面和下注尺度，说明摊牌价值、薄价值、诈唬和 bluff-catch 阈值。",
+    "3. Turn 范围变化：若该街在 All-in 后且无玩家行动，只写“已 All-in 发牌，无新增行动，不再重估范围”；否则结合转牌牌面和下注尺度分析价值范围、诈唬/半诈唬范围、继续跟注范围。",
+    "4. River 范围变化：若该街在 All-in 后且无玩家行动，只写“已 All-in 发牌，只看摊牌结果”；否则结合河牌牌面和下注尺度分析摊牌价值、薄价值、诈唬和 bluff-catch 阈值。",
     "5. 实战结论：只给 2-4 条最重要的线下 exploit 建议。若 hasKnownOpponentCards=true，最后补 2-3 句已知底牌复盘，解释对手真实思路和打法倾向；否则不要写已知底牌复盘。",
     "",
     "牌局数据 JSON：",
@@ -2332,7 +2401,7 @@ async function runDeepSeekReview() {
       messages: [
         {
           role: "system",
-          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，只按线下实战盈利和玩家倾向分析，不输出 GTO 段落。本牌局通常有 ante 和无限鱿鱼，翻前 3-20BB open 属于常见现场尺度，不要反复解释。分析必须按每条街牌面、行动线、下注尺度推断范围变化：价值对象、想打走的对象、继续范围和弃牌范围。若 payload.hasKnownOpponentCards=true，先按不知道对手底牌的实战视角分析，再用已知底牌复盘对手真实思路和打法倾向；禁止用已知底牌倒推前面的范围分析。"
+          content: "你是一名严谨的线下德州扑克娱乐局复盘教练，只按线下实战盈利和玩家倾向分析，不输出 GTO 段落。本牌局通常有 ante 和无限鱿鱼，翻前 3-20BB open 属于常见现场尺度，不要反复解释。必须优先读取 decisionMeaning：isCallFacingAllIn=true 是跟注对手 All-in，不是主动 All-in；isAllInAction=true 才是主动 All-in。All-in 后若 Turn/River 没有玩家行动，只作为发牌结果，不再分析范围变化或下注对象。若 payload.hasKnownOpponentCards=true，先按不知道对手底牌分析，再用已知底牌复盘。"
         },
         {
           role: "user",
